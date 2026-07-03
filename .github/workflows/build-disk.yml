@@ -5,10 +5,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Channel to build the flashable disk image from"
+        description: "Container channel on ghcr.io (sm8250 builds publish as testing)"
         type: choice
-        options: [beta, stable, testing]
-        default: beta
+        options: [testing, beta, stable]
+        default: testing
+      branch:
+        description: "Git branch with disk/GRUB build scripts"
+        type: string
+        default: sm8250
 
 env:
   IMAGE_NAME: ${{ github.event.repository.name }}
@@ -37,6 +41,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.branch || 'sm8250' }}
 
       - name: Install dependencies
         run: |
@@ -67,7 +73,7 @@ jobs:
           # Build the disk FROM the published container so the disk and the ghcr
           # image are identical content and the installed system's bootc origin
           # points at ghcr (so OTA works). The Justfile pulls the ref for BIB.
-          sudo "${JUST_BIN}" build-armada-image "${IMAGE_REGISTRY}/${IMAGE_NAME}" "${{ inputs.tag }}"
+          sudo "${JUST_BIN}" build-armada-image "${IMAGE_REGISTRY}/${IMAGE_NAME}" "${{ inputs.tag || 'testing' }}"
           sudo chown -R "$(id -u):$(id -g)" output
           IMG=$(find output -maxdepth 1 -name 'armada-*.img.gz' -type f -print -quit)
           sha256sum "${IMG}" > "${IMG}.sha256"
