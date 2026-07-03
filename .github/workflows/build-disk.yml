@@ -14,6 +14,7 @@ env:
   IMAGE_NAME: ${{ github.event.repository.name }}
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
   BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder:latest"
+  ARMADA_GRUB_BOOT: "1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -46,6 +47,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             containernetworking-plugins \
             curl \
+            grub-efi-arm64-bin \
             jq \
             pigz \
             podman \

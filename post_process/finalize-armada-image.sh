@@ -4,7 +4,7 @@
 set -euxo pipefail
 
 RAW_IMAGE="${1:-output/raw/disk.raw}"
-ROCKNIX_ABL_VERSION="${ROCKNIX_ABL_VERSION:-v1.1.1}"
+ROCKNIX_ABL_VERSION="${ROCKNIX_ABL_VERSION:-v1.1.3}"
 OUT="${OUT:-output/armada-$(TZ='America/New_York' date +%Y%m%d).img.gz}"
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -41,7 +41,7 @@ sudo mkdir -p "${WORK}/mnt/rocknix_abl"
 # vfat has no Unix ownership, so `cp -a` would error on chown under set -e.
 ABL_SRC=$(ls -d "${WORK}/abl-extracted"/rocknix-abl-*)
 sudo cp "${REPO_ROOT}/abl/README" "${WORK}/mnt/rocknix_abl/README"
-for soc in SM8550 SM8650 SM8750; do
+for soc in SM8250 SM8550 SM8650 SM8750; do
     d="${WORK}/mnt/rocknix_abl/${soc}"
     sudo mkdir -p "$d"
     sudo cp "${ABL_SRC}/abl_signed-${soc}.elf" "${ABL_SRC}/abl_signed-${soc}.elf.sha256" "$d/"
@@ -52,8 +52,10 @@ for soc in SM8550 SM8650 SM8750; do
     sudo chmod 0755 "$d"/*.sh
 done
 
-# Disable GRUB so ABL falls through to /KERNEL.
-if [ -d "${WORK}/mnt/EFI" ]; then sudo mv "${WORK}/mnt/EFI" "${WORK}/mnt/EFI.disabled"; fi
+# SM8250 boots via GRUB/EFI (see D1); other SoCs fall through to /KERNEL when EFI is absent.
+if [ "${ARMADA_GRUB_BOOT:-0}" != "1" ]; then
+    if [ -d "${WORK}/mnt/EFI" ]; then sudo mv "${WORK}/mnt/EFI" "${WORK}/mnt/EFI.disabled"; fi
+fi
 sudo sync
 sudo umount "${WORK}/mnt"
 

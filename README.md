@@ -46,6 +46,14 @@ Includes:
 | AYANEO Pocket DMG | SM8550 | ⚪ Untested |
 | AYANEO Pocket DS | SM8550 | ⚪ Untested |
 | AYANEO Pocket S 2K | SM8550 | ⚪ Untested |
+| Retroid Pocket 5 | SM8250 | ⚪ Untested |
+| Retroid Pocket Flip 2 | SM8250 | ⚪ Untested |
+
+Snapdragon 865 (SM8250) devices are slower than SM8550-class hardware: expect
+roughly 40–50% of SM8550 CPU throughput and a weaker Adreno 650 GPU. Titles that
+run well on newer handhelds may need lower settings or native ARM builds rather
+than Proton. SM8250 images boot via GRUB/EFI on the SD card FAT partition (not
+the `/KERNEL` Android bootimg path used on SM8550+).
 
 ## Flash to SD card
 

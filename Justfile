@@ -197,7 +197,11 @@ build-armada-image $target_image=("localhost/" + image_name) $tag=default_tag: (
     version=$(podman inspect -t image "${target_image}:${tag}" \
                 | jq -r '.[0].Config.Labels["org.opencontainers.image.version"] // empty')
     ./post_process/preseed-flatpaks.sh output/image/disk.raw
-    ./post_process/make-bootimg.sh output/image/disk.raw
+    if [[ "${ARMADA_GRUB_BOOT:-0}" == "1" ]]; then
+        ./post_process/stage-grub-efi.sh output/image/disk.raw
+    else
+        ./post_process/make-bootimg.sh output/image/disk.raw
+    fi
     # Name from the container's version so a flashed device traces to its build.
     if [[ -n "$version" && "$version" != unknown ]]; then
         export OUT="output/armada-${version}.img.gz"

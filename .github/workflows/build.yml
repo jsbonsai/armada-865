@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - main
+      - sm8250
     paths-ignore:
       - '**/README.md'
   workflow_dispatch:

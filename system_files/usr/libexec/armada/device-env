@@ -24,6 +24,8 @@ case "$model" in
     "AYN Odin 3") profile=ayn-odin-3 ;;
     "Retroid Pocket 6 (D-Pad Bottom)") profile=retroid-pocket-6 ;;
     "Retroid Pocket 6 (D-Pad Top)") profile=retroid-pocket-6 ;;
+    "Retroid Pocket 5") profile=retroid-pocket-5 ;;
+    "Retroid Pocket Flip2") profile=retroid-pocket-flip-2 ;;
     *) profile= ;;
 esac
 
