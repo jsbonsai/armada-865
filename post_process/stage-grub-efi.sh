@@ -11,8 +11,18 @@ SM8250_DTBS=(sm8250-retroidpocket-rp5 sm8250-retroidpocket-flip2)
 
 [[ -f "${RAW}" ]] || { echo "raw image not found: ${RAW}"; exit 1; }
 [[ -r "${DTB_LIST}" ]] || { echo "missing ${DTB_LIST}"; exit 1; }
-command -v grub-mkstandalone >/dev/null \
-    || { echo "ERROR: grub-mkstandalone not found (apt: grub-efi-arm64-bin)"; exit 1; }
+
+GRUB_EFI="${GRUB_EFI:-}"
+if [[ -z "${GRUB_EFI}" ]]; then
+    for c in \
+        /usr/lib/grub/arm64-efi/grubaa64.efi \
+        /usr/lib/grub/arm64-efi/monolithic/grubaa64.efi \
+        /usr/lib/grub/arm64-efi-signed/grubaa64.efi \
+        /usr/lib/grub/arm64-efi-signed/grubaa64.efi.signed; do
+        [[ -f "${c}" ]] && GRUB_EFI="${c}" && break
+    done
+fi
+[[ -n "${GRUB_EFI}" ]] || { echo "ERROR: set GRUB_EFI to grubaa64.efi (apt: grub-efi-arm64-bin)"; exit 1; }
 
 WORK=$(mktemp -d)
 LOOP=$(sudo losetup -fP --show "${RAW}")
@@ -43,7 +53,7 @@ sudo cat "${BOOTDIR}/vmlinuz-${KVER}" > "${WORK}/vmlinuz"
 sudo cat "${BOOTDIR}/initramfs-${KVER}.img" > "${WORK}/initramfs.img"
 
 cat > "${WORK}/grub.cfg" <<EOF
-set timeout=5
+set timeout=3
 set default=0
 set timeout_style=menu
 
@@ -62,30 +72,20 @@ menuentry 'Retroid Pocket Flip 2' {
 }
 EOF
 
-# Embed the menu in bootaa64.efi — Ubuntu's monolithic .efi looks for grub.cfg at a
-# hardcoded prefix and drops to the rescue shell on RP5 when it is not found.
-grub-mkstandalone -O arm64-efi -o "${WORK}/bootaa64.efi" -p /boot/grub \
-    --modules "part_msdos part_gpt fat search search_fs_file linux initrd normal fdt" \
-    "boot/grub/grub.cfg=${WORK}/grub.cfg"
-
 sudo mount "${LOOP}p1" "${WORK}/p1"
 sudo mkdir -p "${WORK}/p1/EFI/BOOT" "${WORK}/p1/boot/grub"
 sudo cp "${WORK}/vmlinuz" "${WORK}/p1/KERNEL"
 sudo cp "${WORK}/initramfs.img" "${WORK}/p1/INITRD"
-sudo cp "${WORK}/bootaa64.efi" "${WORK}/p1/EFI/BOOT/bootaa64.efi"
-sudo cp "${WORK}/grub.cfg" "${WORK}/p1/boot/grub/grub.cfg"
+sudo cp "${GRUB_EFI}" "${WORK}/p1/EFI/BOOT/bootaa64.efi"
+# UEFI loads grub.cfg from the same directory as bootaa64.efi on RP5.
 sudo cp "${WORK}/grub.cfg" "${WORK}/p1/EFI/BOOT/grub.cfg"
+sudo cp "${WORK}/grub.cfg" "${WORK}/p1/boot/grub/grub.cfg"
 
 for _name in "${SM8250_DTBS[@]}"; do
     _dtb="${BOOTDIR}/dtb/qcom/${_name}.dtb"
     sudo test -f "${_dtb}" || { echo "ERROR: missing DTB ${_dtb}"; exit 1; }
     sudo cp "${_dtb}" "${WORK}/p1/boot/grub/${_name}.dtb"
 done
-
-if command -v grub-editenv >/dev/null; then
-    grub-editenv "${WORK}/grubenv" create
-    sudo cp "${WORK}/grubenv" "${WORK}/p1/boot/grub/grubenv"
-fi
 
 sudo sync
 echo "Staged GRUB/EFI payload on ${RAW} (kver=${KVER})"
