@@ -6,7 +6,8 @@ Wants=pipewire.service wireplumber.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/armada/sm8250-audio-init sink
+ExecStartPre=/bin/sleep 2
+ExecStart=/bin/bash -c '/etc/armada/sm8250-audio-init boot || true'
 RemainAfterExit=yes
 
 [Install]

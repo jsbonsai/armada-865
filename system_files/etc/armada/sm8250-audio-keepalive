@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# User-session watchdog: recover from auto_null and refresh DMA mixers during playback.
+# System watchdog: recover broken PipeWire routing only when needed (runs as root).
 set -euo pipefail
 
-uid=$(id -u)
-export XDG_RUNTIME_DIR="/run/user/${uid}"
 INIT=/etc/armada/sm8250-audio-init
+USER=armada
+uid=$(id -u "$USER" 2>/dev/null || echo 1000)
+export XDG_RUNTIME_DIR="/run/user/${uid}"
 
 grep -q RetroidPocket /proc/asound/cards 2>/dev/null || exit 0
 [[ -x "$INIT" ]] || exit 0
+[[ -d "$XDG_RUNTIME_DIR" ]] || exit 0
 
-default=$(pactl get-default-sink 2>/dev/null || echo "")
-if [[ "$default" == "auto_null" ]] || ! pactl list sinks short 2>/dev/null | grep -q 'alsa_sink.sm8250_speaker'; then
-    sudo "$INIT" all
+default=$(runuser -u "$USER" -- pactl get-default-sink 2>/dev/null || echo "")
+has_sink=false
+runuser -u "$USER" -- pactl list sinks short 2>/dev/null | grep -q 'alsa_sink.sm8250_speaker' && has_sink=true
+
+if [[ "$default" == "auto_null" ]] || ! $has_sink; then
+    "$INIT" all
     exit 0
 fi
 
-sudo "$INIT" refresh
+# Sink exists but ALSA DMA path dropped — repair routing only (no sink reload, no volume reset).
+card=$(awk '/RetroidPocket/ { print $1; exit }' /proc/asound/cards)
+if [[ -n "$card" ]]; then
+    if ! amixer -c "$card" cget "name=WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2" 2>/dev/null | grep -q ': values=on'; then
+        "$INIT" dma
+    fi
+fi

@@ -32,14 +32,7 @@ if [[ -x /etc/armada/sm8250-audio-init ]] && grep -q RetroidPocket /proc/asound/
     unset STEAM_DISABLE_AUDIO_DEVICE_SWITCHING
     export PULSE_SINK=alsa_sink.sm8250_speaker
     export PULSE_DEFAULT_SINK=alsa_sink.sm8250_speaker
-    /etc/armada/sm8250-audio-init all || true
-    # Steam startup races PipeWire and latches onto auto_null; re-apply after it connects.
-    (
-        sleep 8
-        /etc/armada/sm8250-audio-init all || true
-        sleep 15
-        /etc/armada/sm8250-audio-init all || true
-    ) &
+    /etc/armada/sm8250-audio-init boot || true
 fi
 /usr/libexec/armada/powerbuttond >/dev/null 2>&1 &
 cd "${steam_arm_dir}"

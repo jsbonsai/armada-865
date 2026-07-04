@@ -5,4 +5,4 @@ After=sound.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/armada/sm8250-audio-keepalive
+ExecStart=/etc/armada/sm8250-audio-keepalive

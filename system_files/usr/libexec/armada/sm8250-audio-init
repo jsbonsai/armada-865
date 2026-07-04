@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring up SM8250 RetroidPocket speaker path on hw:0,1 (MultiMedia2 / WSA speakers).
-# Usage: sm8250-audio-init [mixers|sink|refresh|all]   (default: all)
+# Usage: sm8250-audio-init [mixers|sink|dma|refresh|all]   (default: all)
 set -euo pipefail
 
 mode="${1:-all}"
@@ -13,6 +13,7 @@ fi
 
 SINK_NAME=alsa_sink.sm8250_speaker
 DEVICE="plughw:${card},1"
+DEFAULT_SINK_VOLUME="${ARMADA_SM8250_SINK_VOLUME:-35%}"
 
 amixer_set() {
     amixer -c "$card" cset "name=$1" "$2" >/dev/null 2>&1 || true
@@ -22,16 +23,21 @@ mixer_is_on() {
     amixer -c "$card" cget "name=$1" 2>/dev/null | grep -q ': values=on'
 }
 
-apply_speaker_mixers() {
-    # HiFi EnableSequence (UCM HiFi-RP.conf)
-    amixer_set "RX_CODEC_DMA_RX_0 Audio Mixer MultiMedia1" 1
-    amixer_set "MultiMedia3 Mixer TX_CODEC_DMA_TX_3" 1
-    # BootSequence volumes (RetroidPocket.conf)
-    amixer_set "WSA_RX0 Digital Volume" 120
-    amixer_set "WSA_RX1 Digital Volume" 120
+speaker_dma_ready() {
+    mixer_is_on "WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2"
+}
+
+apply_speaker_volumes() {
+    # BootSequence volumes (RetroidPocket.conf) — applied once at boot/sink create, not on refresh.
+    amixer_set "WSA_RX0 Digital Volume" 70
+    amixer_set "WSA_RX1 Digital Volume" 70
     amixer_set "SpkrLeft PA Volume" 12
     amixer_set "SpkrRight PA Volume" 12
-    # wsa-macro + wsa881x SpeakerEnableSeq
+}
+
+apply_speaker_routing() {
+    amixer_set "RX_CODEC_DMA_RX_0 Audio Mixer MultiMedia1" 1
+    amixer_set "MultiMedia3 Mixer TX_CODEC_DMA_TX_3" 1
     amixer_set "WSA RX0 MUX" "AIF1_PB"
     amixer_set "WSA RX1 MUX" "AIF1_PB"
     amixer_set "WSA_RX0 INP0" "RX0"
@@ -44,15 +50,16 @@ apply_speaker_mixers() {
     amixer_set "SpkrRight BOOST Switch" 1
     amixer_set "SpkrRight DAC Switch" 1
     amixer_set "SpkrRight VISENSE Switch" 0
-    ensure_speaker_dma_path
 }
 
 ensure_speaker_dma_path() {
+    # DAPM: these two controls knock each other off — whichever is set last wins.
+    # TX first, RX LAST (RX is the playback route speaker_dma_ready checks).
     local i
     for i in 1 2 3; do
         amixer_set "MultiMedia2 Mixer WSA_CODEC_DMA_TX_0" 1
         amixer_set "WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2" 1
-        if mixer_is_on "WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2"; then
+        if speaker_dma_ready; then
             return 0
         fi
         sleep 0.2
@@ -61,29 +68,97 @@ ensure_speaker_dma_path() {
 }
 
 refresh_dma_path_active() {
-    amixer_set "WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2" 1
+    # Same DAPM rule as ensure_speaker_dma_path: RX must be set LAST.
     amixer_set "MultiMedia2 Mixer WSA_CODEC_DMA_TX_0" 1
+    amixer_set "WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2" 1
 }
 
-refresh_active_path() {
-    apply_speaker_mixers
-    refresh_dma_path_active
+apply_speaker_mixers() {
+    apply_speaker_volumes
+    apply_speaker_routing
+    ensure_speaker_dma_path || true
 }
 
 speaker_path_ready() {
-    apply_speaker_mixers
+    apply_speaker_routing
+    ensure_speaker_dma_path
+}
+
+run_as_user() {
+    local user=$1
+    shift
+    local uid
+    uid=$(id -u "$user")
+    if [[ "$(id -u)" -eq 0 ]]; then
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" "$@"
+    elif [[ "$(id -u)" -eq "$uid" ]]; then
+        export XDG_RUNTIME_DIR="/run/user/${uid}"
+        "$@"
+    else
+        return 1
+    fi
+}
+
+wait_for_pipewire() {
+    local user=$1 i
+    for i in $(seq 1 30); do
+        if run_as_user "$user" pactl info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+sink_exists_for_user() {
+    local user=$1
+    run_as_user "$user" pactl list sinks short 2>/dev/null | grep -q "$SINK_NAME"
+}
+
+boot_audio() {
+    local user=$1 attempt
+    [[ -d "/run/user/$(id -u "$user")" ]] || return 1
+    wait_for_pipewire "$user" || return 1
+    for attempt in $(seq 1 25); do
+        apply_speaker_volumes
+        if speaker_path_ready; then
+            setup_user_sink "$user" && sink_exists_for_user "$user" && return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+read_saved_sink_volume() {
+    local user=$1
+    local uid vol
+    uid=$(id -u "$user")
+    vol=$(runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" \
+        pactl get-sink-volume "$SINK_NAME" 2>/dev/null | awk -F'[ (%]+' '/%/ {print $2"%"; exit}' || true)
+    if [[ -n "$vol" && "$vol" != "0%" ]]; then
+        printf '%s\n' "$vol"
+    else
+        printf '%s\n' "$DEFAULT_SINK_VOLUME"
+    fi
 }
 
 setup_user_sink() {
     local user=$1
-    local uid
+    local uid saved_vol
     uid=$(id -u "$user")
     [[ -d "/run/user/${uid}" ]] || return 0
 
-    speaker_path_ready || return 0
+    if [[ "$(id -u)" -eq 0 ]]; then
+        saved_vol=$(read_saved_sink_volume "$user")
+    else
+        saved_vol=$(pactl get-sink-volume "$SINK_NAME" 2>/dev/null | awk -F'[ (%]+' '/%/ {print $2"%"; exit}' || true)
+        [[ -z "$saved_vol" || "$saved_vol" == "0%" ]] && saved_vol="$DEFAULT_SINK_VOLUME"
+    fi
 
-    runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" DEVICE="$DEVICE" SINK_NAME="$SINK_NAME" \
-        bash -c '
+    speaker_path_ready || return 1
+
+    local sink_script
+    sink_script='
             set -uo pipefail
 
             idx=$(pactl list modules short 2>/dev/null | awk "/sink_name=${SINK_NAME}/ {print \$1; exit}")
@@ -93,20 +168,35 @@ setup_user_sink() {
                 sink_name="$SINK_NAME" \
                 device="$DEVICE" \
                 format=s16le channels=2 rate=48000 \
-                sink_properties="device.description=RetroidPocket Speakers,device.form_factor=speaker" \
+                "sink_properties='\''device.description=\"RetroidPocket Speakers\" device.form_factor=speaker session.suspend-timeout-seconds=0'\''" \
                 >/dev/null 2>&1 || true
 
             if pactl list sinks short 2>/dev/null | grep -q "$SINK_NAME"; then
                 pactl set-default-sink "$SINK_NAME" 2>/dev/null || true
-                pactl set-sink-mute "$SINK_NAME" 0 2>/dev/null || true
-                pactl set-sink-volume "$SINK_NAME" 35% 2>/dev/null || true
+                pactl set-sink-mute "$SINK_NAME" 1 2>/dev/null || true
+                pactl set-sink-volume "$SINK_NAME" "$SAVED_VOL" 2>/dev/null || true
                 id=$(wpctl status 2>/dev/null | awk "/RetroidPocket Speakers/{print \$2; exit}" | tr -d ".")
                 [[ -n "$id" ]] && wpctl set-default "$id" 2>/dev/null || true
                 pactl list sink-inputs short 2>/dev/null | while read -r sid _; do
                     [[ -n "$sid" ]] && pactl move-sink-input "$sid" "$SINK_NAME" 2>/dev/null || true
                 done
+                null_mod=$(pactl list modules short 2>/dev/null | awk "/module-always-sink/ {print \$1; exit}")
+                if [[ -n "$null_mod" ]] && ! pactl list sink-inputs short 2>/dev/null | grep -q "auto_null"; then
+                    pactl unload-module "$null_mod" 2>/dev/null || true
+                fi
+                pactl set-sink-mute "$SINK_NAME" 0 2>/dev/null || true
             fi
         '
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" DEVICE="$DEVICE" SINK_NAME="$SINK_NAME" SAVED_VOL="$saved_vol" \
+            bash -c "$sink_script"
+    elif [[ "$(id -u)" -eq "$uid" ]]; then
+        export XDG_RUNTIME_DIR="/run/user/${uid}" DEVICE SINK_NAME SAVED_VOL="$saved_vol"
+        bash -c "$sink_script"
+    else
+        return 1
+    fi
 
     refresh_dma_path_active
 }
@@ -115,6 +205,11 @@ case "$mode" in
     mixers)
         apply_speaker_mixers
         ;;
+    mixers-strict)
+        apply_speaker_volumes
+        apply_speaker_routing
+        ensure_speaker_dma_path
+        ;;
     sink)
         for user in armada; do
             if id "$user" &>/dev/null; then
@@ -122,19 +217,27 @@ case "$mode" in
             fi
         done
         ;;
+    dma)
+        refresh_dma_path_active
+        ;;
     refresh)
-        refresh_active_path
+        refresh_dma_path_active
         ;;
     all)
-        apply_speaker_mixers
-        for user in armada; do
-            if id "$user" &>/dev/null; then
-                setup_user_sink "$user"
-            fi
-        done
+        apply_speaker_volumes
+        if speaker_path_ready; then
+            for user in armada; do
+                if id "$user" &>/dev/null; then
+                    setup_user_sink "$user" || true
+                fi
+            done
+        fi
+        ;;
+    boot)
+        boot_audio armada || true
         ;;
     *)
-        echo "Usage: $0 [mixers|sink|all]" >&2
+        echo "Usage: $0 [mixers|sink|dma|refresh|all]" >&2
         exit 1
         ;;
 esac

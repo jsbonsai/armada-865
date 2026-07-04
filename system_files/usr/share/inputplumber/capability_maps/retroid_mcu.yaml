@@ -40,11 +40,11 @@ mapping:
       - evdev: { event_type: KEY, event_code: BTN_SELECT, value_type: button }
     target_event:
       gamepad: { button: Select }
-  - name: F1 Key
+  - name: Quick Access Button
     source_events:
       - evdev: { event_type: KEY, event_code: BTN_BACK, value_type: button }
     target_event:
-      keyboard: KeyF1
+      gamepad: { button: QuickAccess }
   - name: Right Trigger
     source_events:
       - evdev: { event_type: ABS, event_code: ABS_HAT2Y, value_type: trigger }

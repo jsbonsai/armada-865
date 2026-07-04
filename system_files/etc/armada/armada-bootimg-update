@@ -3,6 +3,15 @@
 # bootc upgrade/rollback takes effect — ostree is bootloader=none and won't.
 set -euo pipefail
 
+# SM8250 GRUB/EFI (D1): never write Android bootimg to /KERNEL.
+if [ -f /etc/armada/.sm8250-grub-efi ]; then
+    if [ -x /etc/armada/armada-grub-efi-update ]; then
+        exec /etc/armada/armada-grub-efi-update
+    fi
+    echo "armada-bootimg-update: SM8250 GRUB boot — bootimg writer disabled" >&2
+    exit 0
+fi
+
 ESP="${ESP:-/boot/efi}"
 BOOTROOT="${BOOTROOT:-/boot}"
 MKBOOTIMG="${MKBOOTIMG:-/usr/libexec/armada/mkbootimg.py}"

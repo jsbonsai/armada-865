@@ -15,6 +15,21 @@ mount_bind() {
     mount --bind "$src" "$dst"
 }
 
+setup_boot() {
+    mkdir -p /etc/systemd/system/armada-bootimg-sync.service.d
+    if [[ -f /etc/armada/sm8250-grub-efi.conf ]]; then
+        cp -f /etc/armada/sm8250-grub-efi.conf \
+            /etc/systemd/system/armada-bootimg-sync.service.d/sm8250-grub-efi.conf
+    fi
+    touch /etc/armada/.sm8250-grub-efi
+    if [[ -x /etc/armada/armada-grub-efi-update ]]; then
+        chmod +x /etc/armada/armada-grub-efi-update /etc/armada/armada-bootimg-update 2>/dev/null || true
+    fi
+    if [[ -x /etc/armada/launch-steam ]]; then
+        mount_bind /etc/armada/launch-steam /usr/libexec/armada/launch-steam
+    fi
+}
+
 setup_input() {
     mount_bind /etc/armada/inputplumber/devices /usr/share/inputplumber/devices
     mount_bind /etc/armada/inputplumber/capability_maps /usr/share/inputplumber/capability_maps
@@ -48,9 +63,11 @@ setup_audio() {
 }
 
 case "$mode" in
+    boot) setup_boot ;;
     input) setup_input ;;
     audio) setup_audio ;;
     all)
+        setup_boot
         setup_input
         setup_audio
         ;;
