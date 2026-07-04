@@ -19,6 +19,7 @@ ARMADA_PROFILE_NAMES = {
     "AYANEO Layout",
     "AYANEO Standard Layout",
     "AYN Layout",
+    "Retroid Layout",
 }
 
 

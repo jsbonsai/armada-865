@@ -1,0 +1,13 @@
+[Unit]
+Description=Initialize SM8250 RetroidPocket audio routing
+ConditionPathExists=/proc/asound/cards
+After=sound.target pipewire.service
+Wants=pipewire.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/armada/sm8250-audio-init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

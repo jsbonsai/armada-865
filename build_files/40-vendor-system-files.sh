@@ -23,6 +23,7 @@ systemctl enable armada-session-default.service
 systemctl enable seatd.service
 systemctl enable armada-input-calibration.service
 systemctl enable armada-controller-type.service
+systemctl enable armada-sm8250-audio.service
 systemctl enable inputplumber.service
 systemctl enable armada-device-quirks.service
 systemctl enable armada-fixups.service

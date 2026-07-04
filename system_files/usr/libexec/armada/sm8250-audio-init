@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Bring up SM8250 RetroidPocket speaker path and ensure PipeWire has a real sink.
+set -euo pipefail
+
+card=""
+if [[ -r /proc/asound/cards ]]; then
+    card=$(awk '/RetroidPocket/ { print $1; exit }' /proc/asound/cards)
+fi
+[[ -n "$card" ]] || exit 0
+
+amixer_set() {
+    amixer -c "$card" cset "$1" "$2" >/dev/null 2>&1 || true
+}
+
+# UCM HiFi EnableSequence + BootSequence from Qualcomm/sm8250/HiFi-RP.conf
+amixer_set "name='RX_CODEC_DMA_RX_0 Audio Mixer MultiMedia1'" 1
+amixer_set "name='WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2'" 1
+amixer_set "name='MultiMedia3 Mixer TX_CODEC_DMA_TX_3'" 1
+amixer_set "name='WSA_RX0 Digital Volume'" 120
+amixer_set "name='WSA_RX1 Digital Volume'" 120
+amixer_set "name='SpkrLeft PA Volume'" 12
+amixer_set "name='SpkrRight PA Volume'" 12
+amixer_set "name='HPHL Volume'" 20
+amixer_set "name='HPHR Volume'" 20
+
+# WirePlumber ACP still fails to instantiate UCM ports on SM8250 (pro-output-* proxy
+# destroyed). Fall back to a direct ALSA sink on the speaker PCM (hw:N,1).
+setup_user_sink() {
+    local user=$1
+    local uid home
+    uid=$(id -u "$user")
+    home=$(getent passwd "$user" | cut -d: -f6)
+    [[ -n "$home" && -d "$home" ]] || return 0
+
+    runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" \
+        bash -c '
+            set -euo pipefail
+            card='"$card"'
+            if pactl list sinks short 2>/dev/null | grep -q "alsa_sink.sm8250_speaker"; then
+                pactl set-default-sink alsa_sink.sm8250_speaker 2>/dev/null || true
+                exit 0
+            fi
+            if pactl list sinks short 2>/dev/null | grep -v auto_null | grep -q .; then
+                exit 0
+            fi
+            pactl load-module module-alsa-sink \
+                sink_name=alsa_sink.sm8250_speaker \
+                device="hw:${card},1" \
+                sink_properties=device.description="RetroidPocket Speakers" \
+                >/dev/null 2>&1 || true
+            pactl set-default-sink alsa_sink.sm8250_speaker 2>/dev/null || true
+        '
+}
+
+for user in armada; do
+    if id "$user" &>/dev/null; then
+        setup_user_sink "$user"
+    fi
+done
