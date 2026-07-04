@@ -27,3 +27,15 @@ if [[ -n "$card" ]]; then
         "$INIT" dma
     fi
 fi
+
+# Sink exists but PCM is dead: the q6asm audio client got freed and PipeWire
+# retries snd_pcm_prepare forever (~26/s storm) without ever closing the device.
+# Only a full close + reopen allocates a fresh DSP client — recycle the sink.
+if journalctl _SYSTEMD_USER_UNIT=pipewire.service --since "-35s" --no-pager 2>/dev/null \
+        | grep -q 'snd_pcm_prepare error'; then
+    idx=$(runuser -u "$USER" -- pactl list modules short 2>/dev/null \
+        | awk '/sink_name=alsa_sink.sm8250_speaker/ {print $1; exit}')
+    [[ -n "$idx" ]] && runuser -u "$USER" -- pactl unload-module "$idx" 2>/dev/null || true
+    sleep 2
+    "$INIT" all
+fi
