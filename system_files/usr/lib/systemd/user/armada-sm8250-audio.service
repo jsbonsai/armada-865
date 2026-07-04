@@ -1,0 +1,13 @@
+[Unit]
+Description=Create SM8250 RetroidPocket PipeWire speaker sink
+ConditionPathExists=/proc/asound/cards
+After=pipewire.service wireplumber.service pipewire-pulse.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/armada/sm8250-audio-init sink
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

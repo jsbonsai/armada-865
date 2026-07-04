@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply SM8250 speaker mixers before PipeWire opens ALSA
+ConditionPathExists=/proc/asound/cards
+DefaultDependencies=no
+Before=pipewire.socket pipewire.service wireplumber.service pipewire-pulse.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/armada/sm8250-audio-init mixers
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

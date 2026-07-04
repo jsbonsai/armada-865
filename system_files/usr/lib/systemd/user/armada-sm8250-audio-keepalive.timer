@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodic SM8250 audio path watchdog
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=20
+
+[Install]
+WantedBy=timers.target

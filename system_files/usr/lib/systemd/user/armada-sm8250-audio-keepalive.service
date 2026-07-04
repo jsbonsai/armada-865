@@ -1,0 +1,7 @@
+[Unit]
+Description=SM8250 audio watchdog (recover auto_null, refresh mixers)
+ConditionPathExists=/proc/asound/cards
+
+[Service]
+Type=oneshot
+ExecStart=/etc/armada/sm8250-audio-keepalive

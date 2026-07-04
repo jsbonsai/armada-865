@@ -1,0 +1,109 @@
+#!/bin/bash
+# Refresh FAT /KERNEL + /INITRD + grub.cfg for SM8250 GRUB/EFI boot (D1).
+# GRUB loads a raw ARM64 Image — not an Android bootimg.
+set -euo pipefail
+
+ESP="${ESP:-/boot/efi}"
+BOOTROOT="${BOOTROOT:-/boot}"
+DTB_LIST="${DTB_LIST:-/usr/lib/armada/supported-dtbs}"
+ARGS_FILE="${ARGS_FILE:-/usr/lib/armada/bootimg-args}"
+STAMP="${ESP}/.armada-grub-efi.id"
+GRUB_CFG="${ESP}/EFI/BOOT/grub.cfg"
+GRUB_CFG_ALT="${ESP}/boot/grub/grub.cfg"
+
+[ -r "${DTB_LIST}" ] || { echo "armada-grub-efi-update: missing ${DTB_LIST}" >&2; exit 1; }
+[ -r "${ARGS_FILE}" ] || { echo "armada-grub-efi-update: missing ${ARGS_FILE}" >&2; exit 1; }
+# shellcheck source=/usr/lib/armada/bootimg-args
+. "${ARGS_FILE}"
+
+findmnt -rn "${ESP}" >/dev/null 2>&1 || {
+    echo "armada-grub-efi-update: ${ESP} is not a mountpoint" >&2
+    exit 1
+}
+
+entry=$(armada_default_bls_entry "${BOOTROOT}")
+[ -n "${entry:-}" ] || { echo "armada-grub-efi-update: no BLS entry" >&2; exit 1; }
+
+linux=$(sed -n 's/^linux //p' "${entry}" | head -1)
+initrd=$(sed -n 's/^initrd //p' "${entry}" | head -1)
+options=$(sed -n 's/^options //p' "${entry}" | head -1)
+
+kpath="${BOOTROOT}${linux#/boot}"
+ipath="${BOOTROOT}${initrd#/boot}"
+
+kernel_is_raw_vmlinuz() {
+    local f=$1
+    [ -s "${f}" ] || return 1
+    # Android bootimg magic — GRUB cannot `linux` this (CONFIG_EFI_STUB error).
+    if head -c 8 "${f}" 2>/dev/null | grep -q 'ANDROID!'; then
+        return 1
+    fi
+    return 0
+}
+
+id=$(printf '%s\n%s\n%s\n' "${linux}" "${initrd}" "${options}" | sha256sum | cut -d' ' -f1)
+if [ -f "${ESP}/KERNEL" ] && [ -f "${ESP}/INITRD" ] && \
+   [ "$(cat "${STAMP}" 2>/dev/null || true)" = "${id}" ] && \
+   kernel_is_raw_vmlinuz "${ESP}/KERNEL"; then
+    echo "armada-grub-efi-update: ESP payload already current (${linux##*/})"
+    exit 0
+fi
+if [ -f "${ESP}/KERNEL" ] && ! kernel_is_raw_vmlinuz "${ESP}/KERNEL"; then
+    echo "armada-grub-efi-update: ${ESP}/KERNEL is not a raw vmlinuz (likely Android bootimg); rewriting" >&2
+fi
+
+CMDLINE=""
+_ostree=""
+for _t in ${options}; do
+    case "${_t}" in
+        console=ttyS0) continue ;;
+        ostree=*) _ostree="${_t}" ;;
+        *) CMDLINE="${CMDLINE} ${_t}" ;;
+    esac
+done
+CMDLINE="${_ostree}${CMDLINE} quiet rootwait console=tty0 video=efifb:off"
+
+write_grub_cfg() {
+    local _out=$1
+    cat > "${_out}" <<EOF
+set timeout=3
+set default=0
+set timeout_style=menu
+
+menuentry 'Retroid Pocket 5' {
+    search --set -f /KERNEL
+    linux /KERNEL ${CMDLINE}
+    initrd /INITRD
+    devicetree /boot/grub/sm8250-retroidpocket-rp5.dtb
+}
+
+menuentry 'Retroid Pocket Flip 2' {
+    search --set -f /KERNEL
+    linux /KERNEL ${CMDLINE}
+    initrd /INITRD
+    devicetree /boot/grub/sm8250-retroidpocket-flip2.dtb
+}
+EOF
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+
+write_grub_cfg "${work}/grub.cfg"
+cp -f "${kpath}" "${work}/KERNEL"
+cp -f "${ipath}" "${work}/INITRD"
+
+cp -f "${work}/KERNEL" "${ESP}/.KERNEL.new"
+cp -f "${work}/INITRD" "${ESP}/.INITRD.new"
+sync "${ESP}/.KERNEL.new" "${ESP}/.INITRD.new"
+mv -f "${ESP}/.KERNEL.new" "${ESP}/KERNEL"
+mv -f "${ESP}/.INITRD.new" "${ESP}/INITRD"
+
+mkdir -p "${ESP}/EFI/BOOT" "${ESP}/boot/grub"
+cp -f "${work}/grub.cfg" "${GRUB_CFG}"
+cp -f "${work}/grub.cfg" "${GRUB_CFG_ALT}"
+
+printf '%s' "${id}" > "${STAMP}"
+sync
+
+echo "armada-grub-efi-update: wrote ${ESP}/KERNEL and grub.cfg for ${linux##*/}"

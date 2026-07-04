@@ -24,6 +24,12 @@ systemctl enable seatd.service
 systemctl enable armada-input-calibration.service
 systemctl enable armada-controller-type.service
 systemctl enable armada-sm8250-audio.service
+systemctl enable armada-sm8250-audio-early.service
+systemctl enable armada-sm8250-input-early.service
+systemctl mask alsa-state.service 2>/dev/null || true
+systemctl --global enable armada-sm8250-audio-mixers.service
+systemctl --global enable armada-sm8250-audio.service
+systemctl --global enable armada-sm8250-audio-keepalive.timer
 systemctl enable inputplumber.service
 systemctl enable armada-device-quirks.service
 systemctl enable armada-fixups.service

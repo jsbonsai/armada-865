@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh SM8250 RetroidPocket speaker mixers
+ConditionPathExists=/proc/asound/cards
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/armada/sm8250-audio-init

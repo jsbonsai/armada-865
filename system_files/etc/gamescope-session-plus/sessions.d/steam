@@ -21,4 +21,12 @@ fi
 
 export STEAM_EXTRA_COMPAT_TOOLS_PATHS=/usr/share/steam/compatibilitytools.d
 
+# SM8250: bring up speaker sink before Steam starts (PipeWire otherwise defaults to auto_null).
+if grep -q RetroidPocket /proc/asound/cards 2>/dev/null && [[ -x /etc/armada/sm8250-audio-init ]]; then
+    unset STEAM_DISABLE_AUDIO_DEVICE_SWITCHING
+    export PULSE_SINK=alsa_sink.sm8250_speaker
+    export PULSE_DEFAULT_SINK=alsa_sink.sm8250_speaker
+    /etc/armada/sm8250-audio-init all || true
+fi
+
 CLIENTCMD='/usr/libexec/armada/launch-steam -gamepadui -steamos3 -steampal -steamdeck -noverifyfiles'

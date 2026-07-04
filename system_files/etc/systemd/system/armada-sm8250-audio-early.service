@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply SM8250 speaker mixers before any audio daemon
+DefaultDependencies=no
+After=local-fs.target
+Before=alsa-state.service
+ConditionPathExists=/etc/armada/sm8250-bringup-early.sh
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/armada/sm8250-bringup-early.sh audio
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

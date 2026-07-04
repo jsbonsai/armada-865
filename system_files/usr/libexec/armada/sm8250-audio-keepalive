@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# User-session watchdog: recover from auto_null and refresh DMA mixers during playback.
+set -euo pipefail
+
+uid=$(id -u)
+export XDG_RUNTIME_DIR="/run/user/${uid}"
+INIT=/etc/armada/sm8250-audio-init
+
+grep -q RetroidPocket /proc/asound/cards 2>/dev/null || exit 0
+[[ -x "$INIT" ]] || exit 0
+
+default=$(pactl get-default-sink 2>/dev/null || echo "")
+if [[ "$default" == "auto_null" ]] || ! pactl list sinks short 2>/dev/null | grep -q 'alsa_sink.sm8250_speaker'; then
+    sudo "$INIT" all
+    exit 0
+fi
+
+sudo "$INIT" refresh

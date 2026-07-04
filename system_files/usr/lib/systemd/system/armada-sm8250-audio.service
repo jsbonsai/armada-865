@@ -1,12 +1,13 @@
 [Unit]
-Description=Initialize SM8250 RetroidPocket audio routing
+Description=Apply SM8250 speaker mixer routing before user session audio
 ConditionPathExists=/proc/asound/cards
-After=sound.target pipewire.service
-Wants=pipewire.service
+After=sound.target
+Before=graphical.target sddm.service
+DefaultDependencies=no
 
 [Service]
 Type=oneshot
-ExecStart=/usr/libexec/armada/sm8250-audio-init
+ExecStart=/usr/libexec/armada/sm8250-audio-init mixers
 RemainAfterExit=yes
 
 [Install]
