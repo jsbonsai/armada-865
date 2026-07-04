@@ -14,7 +14,11 @@ SM8250_DTBS=(sm8250-retroidpocket-rp5 sm8250-retroidpocket-flip2)
 
 GRUB_EFI="${GRUB_EFI:-}"
 if [[ -z "${GRUB_EFI}" ]]; then
-    for c in /usr/lib/grub/arm64-efi/grubaa64.efi /usr/lib/grub/arm64-efi-signed/grubaa64.efi; do
+    for c in \
+        /usr/lib/grub/arm64-efi/grubaa64.efi \
+        /usr/lib/grub/arm64-efi/monolithic/grubaa64.efi \
+        /usr/lib/grub/arm64-efi-signed/grubaa64.efi \
+        /usr/lib/grub/arm64-efi-signed/grubaa64.efi.signed; do
         [[ -f "${c}" ]] && GRUB_EFI="${c}" && break
     done
 fi
