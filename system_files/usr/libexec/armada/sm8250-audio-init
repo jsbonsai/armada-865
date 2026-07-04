@@ -168,7 +168,7 @@ setup_user_sink() {
                 sink_name="$SINK_NAME" \
                 device="$DEVICE" \
                 format=s16le channels=2 rate=48000 \
-                "sink_properties='\''device.description=\"RetroidPocket Speakers\" device.form_factor=speaker session.suspend-timeout-seconds=0'\''" \
+                "sink_properties='\''device.description=\"RetroidPocket Speakers\" device.form_factor=speaker session.suspend-timeout-seconds=0 node.suspend-on-idle=false'\''" \
                 >/dev/null 2>&1 || true
 
             if pactl list sinks short 2>/dev/null | grep -q "$SINK_NAME"; then
