@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Log every PipeWire sink appear/disappear with a snapshot of the sink table,
+# plus kernel q6asm state at that moment. Debugging aid for the SM8250 audio
+# bring-up: journalctl -t sm8250-audio-monitor
+# Runs as the session user (needs the pulse socket).
+set -uo pipefail
+
+log() { logger -t sm8250-audio-monitor "$*"; }
+
+snapshot() {
+    local sinks
+    sinks=$(pactl list sinks short 2>/dev/null | awk '{print $2"("$5")"}' | paste -sd, -)
+    printf '%s' "${sinks:-NONE}"
+}
+
+log "monitor started; sinks: $(snapshot)"
+
+pactl subscribe 2>/dev/null | while read -r line; do
+    case "$line" in
+        *"'new' on sink "*|*"'remove' on sink "*)
+            log "$line | sinks now: $(snapshot)"
+            ;;
+        *"'change' on server"*)
+            log "$line | default: $(pactl get-default-sink 2>/dev/null || echo '?') | sinks: $(snapshot)"
+            ;;
+    esac
+done
+
+log "monitor exited (pactl subscribe ended)"

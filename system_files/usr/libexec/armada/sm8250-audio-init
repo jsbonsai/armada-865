@@ -15,6 +15,9 @@ SINK_NAME=alsa_sink.sm8250_speaker
 DEVICE="plughw:${card},1"
 DEFAULT_SINK_VOLUME="${ARMADA_SM8250_SINK_VOLUME:-35%}"
 
+# Lifecycle logging for debugging: journalctl -t sm8250-audio
+log() { logger -t sm8250-audio "[$mode] $*"; }
+
 amixer_set() {
     amixer -c "$card" cset "name=$1" "$2" >/dev/null 2>&1 || true
 }
@@ -64,6 +67,7 @@ ensure_speaker_dma_path() {
         fi
         sleep 0.2
     done
+    log "DMA path FAILED to latch after 3 attempts (RX mixer stays off)"
     return 1
 }
 
@@ -117,15 +121,19 @@ sink_exists_for_user() {
 
 boot_audio() {
     local user=$1 attempt
-    [[ -d "/run/user/$(id -u "$user")" ]] || return 1
-    wait_for_pipewire "$user" || return 1
+    [[ -d "/run/user/$(id -u "$user")" ]] || { log "boot: no user runtime dir"; return 1; }
+    wait_for_pipewire "$user" || { log "boot: PipeWire never became reachable"; return 1; }
     for attempt in $(seq 1 25); do
         apply_speaker_volumes
         if speaker_path_ready; then
-            setup_user_sink "$user" && sink_exists_for_user "$user" && return 0
+            if setup_user_sink "$user" && sink_exists_for_user "$user"; then
+                log "boot: sink up after $attempt attempt(s)"
+                return 0
+            fi
         fi
         sleep 1
     done
+    log "boot: FAILED — no sink after 25 attempts"
     return 1
 }
 
@@ -196,6 +204,12 @@ setup_user_sink() {
         bash -c "$sink_script"
     else
         return 1
+    fi
+
+    if sink_exists_for_user "$user"; then
+        log "sink created/present (vol=$saved_vol, device=$DEVICE)"
+    else
+        log "sink creation FAILED (module load or node start error — check pipewire journal + dmesg q6asm)"
     fi
 
     refresh_dma_path_active

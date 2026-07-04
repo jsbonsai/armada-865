@@ -1,0 +1,13 @@
+[Unit]
+Description=Log SM8250 PipeWire sink lifecycle events (debugging)
+ConditionPathExists=/proc/asound/cards
+After=pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+ExecStart=/usr/libexec/armada/sm8250-audio-monitor
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
