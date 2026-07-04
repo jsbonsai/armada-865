@@ -142,7 +142,7 @@ read_saved_sink_volume() {
     local uid vol
     uid=$(id -u "$user")
     vol=$(runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" \
-        pactl get-sink-volume "$SINK_NAME" 2>/dev/null | awk -F'[ (%]+' '/%/ {print $2"%"; exit}' || true)
+        pactl get-sink-volume "$SINK_NAME" 2>/dev/null | grep -oE '[0-9]+%' | head -1 || true)
     if [[ -n "$vol" && "$vol" != "0%" ]]; then
         printf '%s\n' "$vol"
     else
@@ -159,7 +159,7 @@ setup_user_sink() {
     if [[ "$(id -u)" -eq 0 ]]; then
         saved_vol=$(read_saved_sink_volume "$user")
     else
-        saved_vol=$(pactl get-sink-volume "$SINK_NAME" 2>/dev/null | awk -F'[ (%]+' '/%/ {print $2"%"; exit}' || true)
+        saved_vol=$(pactl get-sink-volume "$SINK_NAME" 2>/dev/null | grep -oE '[0-9]+%' | head -1 || true)
         [[ -z "$saved_vol" || "$saved_vol" == "0%" ]] && saved_vol="$DEFAULT_SINK_VOLUME"
     fi
 
