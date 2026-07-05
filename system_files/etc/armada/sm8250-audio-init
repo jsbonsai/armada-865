@@ -156,6 +156,17 @@ setup_user_sink() {
     uid=$(id -u "$user")
     [[ -d "/run/user/${uid}" ]] || return 0
 
+    # Idempotent: a live sink is never recycled here. Every fresh PCM start is
+    # a chance to hit the AFE/SoundWire start race (hw_ptr freezes, silent), so
+    # only the keepalive's stall detector may tear a sink down. Boot re-invokes
+    # this from several places (user service, gamescope session, launch-steam)
+    # — those become no-ops instead of three extra PCM lifecycles.
+    if sink_exists_for_user "$user"; then
+        log "sink already present — leaving as-is"
+        refresh_dma_path_active
+        return 0
+    fi
+
     if [[ "$(id -u)" -eq 0 ]]; then
         saved_vol=$(read_saved_sink_volume "$user")
     else

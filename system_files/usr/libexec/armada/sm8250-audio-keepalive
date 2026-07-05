@@ -33,6 +33,37 @@ if [[ -n "$card" ]]; then
     fi
 fi
 
+# Sink RUNNING but DMA frozen: the AFE/SoundWire start race arms the playback
+# port without clocking it — hw_ptr freezes (a few hundred frames in) while
+# appl_ptr climbs; zero kernel errors. Tiered recovery: suspend/resume re-rolls
+# the PCM start (cheap); if still frozen, full sink recycle with settle time.
+PCM_STATUS="/proc/asound/card${card}/pcm1p/sub0/status"
+read_hwptr() { awk -F: '/^hw_ptr/ {gsub(/ /,"",$2); print $2; exit}' "$PCM_STATUS" 2>/dev/null; }
+pcm_running() { grep -q '^state: RUNNING' "$PCM_STATUS" 2>/dev/null; }
+if pcm_running; then
+    p1=$(read_hwptr); sleep 1.2; p2=$(read_hwptr)
+    if [[ -n "$p1" && "$p1" == "$p2" ]] && pcm_running; then
+        log "RECOVER: hw_ptr frozen at $p1 while RUNNING -> suspend/resume re-roll"
+        runuser -u "$USER" -- pactl suspend-sink alsa_sink.sm8250_speaker 1 2>/dev/null || true
+        sleep 1
+        runuser -u "$USER" -- pactl suspend-sink alsa_sink.sm8250_speaker 0 2>/dev/null || true
+        sleep 2
+        if pcm_running; then
+            p3=$(read_hwptr); sleep 1.2; p4=$(read_hwptr)
+            if [[ -n "$p3" && "$p3" == "$p4" ]] && pcm_running; then
+                log "RECOVER: still frozen after re-roll -> full sink recycle (with settle)"
+                idx=$(runuser -u "$USER" -- pactl list modules short 2>/dev/null \
+                    | awk '/sink_name=alsa_sink.sm8250_speaker/ {print $1; exit}')
+                [[ -n "$idx" ]] && runuser -u "$USER" -- pactl unload-module "$idx" 2>/dev/null || true
+                sleep 3
+                "$INIT" all
+                exit 0
+            fi
+        fi
+        log "RECOVER: re-roll landed a good start (hw_ptr advancing)"
+    fi
+fi
+
 # Sink exists but PCM is dead: the q6asm audio client got freed and PipeWire
 # retries snd_pcm_prepare forever without ever closing the device. Only a full
 # close + reopen allocates a fresh DSP client — recycle the sink. (If the ADSP
