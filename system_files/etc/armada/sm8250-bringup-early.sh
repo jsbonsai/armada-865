@@ -76,3 +76,10 @@ case "$mode" in
         exit 1
         ;;
 esac
+
+# Belt-and-suspenders for 99-armada-sm8250-wsa-pm.rules: pin SoundWire devices
+# (WSA881x speaker amps + masters) out of runtime suspend; wake races leave the
+# amps dead-silent with no DSP errors.
+for _sdw in /sys/bus/soundwire/devices/*/power/control; do
+    echo on > "$_sdw" 2>/dev/null || true
+done

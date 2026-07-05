@@ -1,0 +1,5 @@
+# SM8250 (RP5/Flip2): keep WSA881x speaker amps and their SoundWire bus out of
+# runtime suspend. Wake-from-clock-stop races on this platform leave the amps
+# unreachable (ASoC -16 register reads) and the whole audio path silently dead
+# with no DSP errors. Costs a few mW; removes the silent-audio failure mode.
+ACTION=="add", SUBSYSTEM=="soundwire", TEST=="power/control", ATTR{power/control}="on"
