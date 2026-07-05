@@ -1,0 +1,18 @@
+[Unit]
+Description=Hold SM8250 speaker PCM open (silent stream prevents stop/start races)
+# Every observed audio death on RP5/Flip2 happens at a PCM stop->start
+# transition (AFE/SoundWire start race: port arms unclocked, hw_ptr freezes,
+# zero errors). A permanent silent stream keeps the PCM RUNNING so the race
+# never re-rolls. 8 kHz mono s16 zeros: ~16 KB/s, inaudible, negligible CPU.
+ConditionPathExists=/proc/asound/cards
+After=pipewire-pulse.service armada-sm8250-audio.service
+Wants=pipewire-pulse.service
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do pactl list sinks short 2>/dev/null | grep -q alsa_sink.sm8250_speaker && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/bin/paplay --raw --rate=8000 --channels=1 --format=s16le --device=alsa_sink.sm8250_speaker /dev/zero
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

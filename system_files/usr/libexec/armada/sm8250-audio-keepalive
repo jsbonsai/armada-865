@@ -1,22 +1,82 @@
 #!/usr/bin/env bash
-# System watchdog: recover broken PipeWire routing only when needed (runs as root).
-# Actions are logged: journalctl -t sm8250-audio-keepalive
+# System watchdog: recover broken SM8250 speaker audio, only when needed.
+# Runs as root every 30s. Actions logged: journalctl -t sm8250-audio-keepalive
+#
+# Failure modes it must catch (all field-observed on RP5/Flip2):
+#  A. Sink missing / default fell back to auto_null       -> rebuild (init all)
+#  B. RX DMA routing dropped with a live sink             -> repair (init dma)
+#  C. PCM RUNNING but hw_ptr frozen (AFE/SoundWire start
+#     race: port armed, never clocked; zero kernel errors) -> re-roll / recycle
+#  D. PipeWire node error/recovery storm (prepare errors,
+#     'Broken pipe' avail loops, node start failures)      -> recycle
+#  E. State mismatch: PipeWire sink RUNNING but kernel PCM
+#     not RUNNING (stuck SETUP/XRUN after idle stop+start)  -> re-roll / recycle
 set -euo pipefail
 
 INIT=/etc/armada/sm8250-audio-init
 USER=armada
+SINK=alsa_sink.sm8250_speaker
 uid=$(id -u "$USER" 2>/dev/null || echo 1000)
 export XDG_RUNTIME_DIR="/run/user/${uid}"
 
 log() { logger -t sm8250-audio-keepalive "$*"; }
+as_user() { runuser -u "$USER" -- env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" "$@"; }
 
 grep -q RetroidPocket /proc/asound/cards 2>/dev/null || exit 0
 [[ -x "$INIT" ]] || exit 0
 [[ -d "$XDG_RUNTIME_DIR" ]] || exit 0
 
-default=$(runuser -u "$USER" -- pactl get-default-sink 2>/dev/null || echo "")
+card=$(awk '/RetroidPocket/ { print $1; exit }' /proc/asound/cards)
+PCM_STATUS="/proc/asound/card${card}/pcm1p/sub0/status"
+
+read_hwptr() { awk -F: '/^hw_ptr/ {gsub(/ /,"",$2); print $2; exit}' "$PCM_STATUS" 2>/dev/null; }
+pcm_state()  { awk '/^state:/ {print $2; exit}' "$PCM_STATUS" 2>/dev/null; }
+pw_sink_running() { as_user pactl list sinks 2>/dev/null | grep -A1 "Name: $SINK" >/dev/null 2>&1 && \
+    as_user pactl list sinks 2>/dev/null | grep -B2 "Name: $SINK" | grep -q "State: RUNNING"; }
+
+reroll_start() {
+    # Cheap recovery: force a full ALSA close+reopen via sink suspend/resume.
+    as_user pactl suspend-sink "$SINK" 1 2>/dev/null || true
+    sleep 1
+    as_user pactl suspend-sink "$SINK" 0 2>/dev/null || true
+    sleep 2
+}
+
+recycle_sink() {
+    local idx
+    idx=$(as_user pactl list modules short 2>/dev/null \
+        | awk "/sink_name=$SINK/ {print \$1; exit}")
+    [[ -n "$idx" ]] && as_user pactl unload-module "$idx" 2>/dev/null || true
+    sleep 3   # settle: let the AFE port fully tear down before the next start
+    "$INIT" all
+}
+
+pcm_healthy_or_recover() {
+    # Returns after ensuring the PCM is either healthy or a recovery was run.
+    local reason=$1
+    log "RECOVER: $reason -> suspend/resume re-roll"
+    reroll_start
+    local s p1 p2
+    s=$(pcm_state)
+    if [[ "$s" == "RUNNING" ]]; then
+        p1=$(read_hwptr); sleep 1.2; p2=$(read_hwptr)
+        if [[ -n "$p1" && "$p1" != "$p2" ]]; then
+            log "RECOVER: re-roll landed a good start (hw_ptr advancing)"
+            return 0
+        fi
+    elif [[ -z "$s" || "$s" == "SETUP" ]] && ! pw_sink_running; then
+        # Nothing playing and device closed/settled — nothing more to prove.
+        log "RECOVER: re-roll done; sink idle, no active stream to verify"
+        return 0
+    fi
+    log "RECOVER: still unhealthy after re-roll -> full sink recycle (with settle)"
+    recycle_sink
+}
+
+# --- A: sink missing / auto_null -------------------------------------------
+default=$(as_user pactl get-default-sink 2>/dev/null || echo "")
 has_sink=false
-runuser -u "$USER" -- pactl list sinks short 2>/dev/null | grep -q 'alsa_sink.sm8250_speaker' && has_sink=true
+as_user pactl list sinks short 2>/dev/null | grep -q "$SINK" && has_sink=true
 
 if [[ "$default" == "auto_null" ]] || ! $has_sink; then
     log "RECOVER: sink missing or default=auto_null (default='$default' has_sink=$has_sink) -> init all"
@@ -24,57 +84,35 @@ if [[ "$default" == "auto_null" ]] || ! $has_sink; then
     exit 0
 fi
 
-# Sink exists but ALSA DMA path dropped — repair routing only (no sink reload, no volume reset).
-card=$(awk '/RetroidPocket/ { print $1; exit }' /proc/asound/cards)
-if [[ -n "$card" ]]; then
-    if ! amixer -c "$card" cget "name=WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2" 2>/dev/null | grep -q ': values=on'; then
-        log "RECOVER: RX DMA mixer off with live sink -> init dma"
-        "$INIT" dma
-    fi
+# --- B: RX DMA routing dropped ----------------------------------------------
+if ! amixer -c "$card" cget "name=WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2" 2>/dev/null | grep -q ': values=on'; then
+    log "RECOVER: RX DMA mixer off with live sink -> init dma"
+    "$INIT" dma
 fi
 
-# Sink RUNNING but DMA frozen: the AFE/SoundWire start race arms the playback
-# port without clocking it — hw_ptr freezes (a few hundred frames in) while
-# appl_ptr climbs; zero kernel errors. Tiered recovery: suspend/resume re-rolls
-# the PCM start (cheap); if still frozen, full sink recycle with settle time.
-PCM_STATUS="/proc/asound/card${card}/pcm1p/sub0/status"
-read_hwptr() { awk -F: '/^hw_ptr/ {gsub(/ /,"",$2); print $2; exit}' "$PCM_STATUS" 2>/dev/null; }
-pcm_running() { grep -q '^state: RUNNING' "$PCM_STATUS" 2>/dev/null; }
-if pcm_running; then
+# --- C: RUNNING but hw_ptr frozen -------------------------------------------
+if [[ "$(pcm_state)" == "RUNNING" ]]; then
     p1=$(read_hwptr); sleep 1.2; p2=$(read_hwptr)
-    if [[ -n "$p1" && "$p1" == "$p2" ]] && pcm_running; then
-        log "RECOVER: hw_ptr frozen at $p1 while RUNNING -> suspend/resume re-roll"
-        runuser -u "$USER" -- pactl suspend-sink alsa_sink.sm8250_speaker 1 2>/dev/null || true
-        sleep 1
-        runuser -u "$USER" -- pactl suspend-sink alsa_sink.sm8250_speaker 0 2>/dev/null || true
-        sleep 2
-        if pcm_running; then
-            p3=$(read_hwptr); sleep 1.2; p4=$(read_hwptr)
-            if [[ -n "$p3" && "$p3" == "$p4" ]] && pcm_running; then
-                log "RECOVER: still frozen after re-roll -> full sink recycle (with settle)"
-                idx=$(runuser -u "$USER" -- pactl list modules short 2>/dev/null \
-                    | awk '/sink_name=alsa_sink.sm8250_speaker/ {print $1; exit}')
-                [[ -n "$idx" ]] && runuser -u "$USER" -- pactl unload-module "$idx" 2>/dev/null || true
-                sleep 3
-                "$INIT" all
-                exit 0
-            fi
-        fi
-        log "RECOVER: re-roll landed a good start (hw_ptr advancing)"
+    if [[ -n "$p1" && "$p1" == "$p2" && "$(pcm_state)" == "RUNNING" ]]; then
+        pcm_healthy_or_recover "hw_ptr frozen at $p1 while RUNNING"
+        exit 0
     fi
 fi
 
-# Sink exists but PCM is dead: the q6asm audio client got freed and PipeWire
-# retries snd_pcm_prepare forever without ever closing the device. Only a full
-# close + reopen allocates a fresh DSP client — recycle the sink. (If the ADSP
-# itself is wedged — q6asm_open_write DSP error 9 'Buffer already allocated' —
-# recreation fails too and only a reboot recovers; the log makes that visible.)
-if journalctl _SYSTEMD_USER_UNIT=pipewire.service --since "-35s" --no-pager 2>/dev/null \
-        | grep -qE 'snd_pcm_prepare error|suspended -> error'; then
-    log "RECOVER: PipeWire node error storm detected -> recycle sink"
-    idx=$(runuser -u "$USER" -- pactl list modules short 2>/dev/null \
-        | awk '/sink_name=alsa_sink.sm8250_speaker/ {print $1; exit}')
-    [[ -n "$idx" ]] && runuser -u "$USER" -- pactl unload-module "$idx" 2>/dev/null || true
+# --- E: PipeWire RUNNING vs kernel PCM stuck --------------------------------
+kstate=$(pcm_state)
+if pw_sink_running && [[ "$kstate" != "RUNNING" && -n "$kstate" ]]; then
     sleep 2
-    "$INIT" all
+    kstate2=$(pcm_state)
+    if pw_sink_running && [[ "$kstate2" != "RUNNING" && -n "$kstate2" ]]; then
+        pcm_healthy_or_recover "PipeWire sink RUNNING but kernel PCM stuck in $kstate2"
+        exit 0
+    fi
+fi
+
+# --- D: PipeWire error/recovery storm ---------------------------------------
+if journalctl _SYSTEMD_USER_UNIT=pipewire.service --since "-35s" --no-pager 2>/dev/null \
+        | grep -qE 'snd_pcm_prepare error|suspended -> error|after recover: Broken pipe|Start error'; then
+    log "RECOVER: PipeWire error storm detected -> recycle sink"
+    recycle_sink
 fi
