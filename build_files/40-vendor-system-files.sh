@@ -10,6 +10,9 @@ chmod 0755 /usr/libexec/armada/mkbootimg.py /usr/libexec/armada/gki/generate_gki
 
 chmod 0755 /usr/libexec/armada/*
 chmod 0755 /usr/libexec/os-session-select
+# /etc/armada carries executable bring-up scripts (systemd ExecStart targets);
+# a lost exec bit fails those units with EXEC spawning/Permission denied.
+find /etc/armada -type f ! -name '*.conf' -exec chmod 0755 {} + 2>/dev/null || true
 
 sed -i '/const allPanels/,$d' /usr/share/plasma/layout-templates/org.kde.plasma.desktop.defaultPanel/contents/layout.js
 sed -i '$r /usr/share/plasma/shells/org.kde.plasma.desktop/contents/updates/armada-pins.js' /usr/share/plasma/layout-templates/org.kde.plasma.desktop.defaultPanel/contents/layout.js
@@ -29,6 +32,7 @@ systemctl enable armada-sm8250-input-early.service
 systemctl mask alsa-state.service 2>/dev/null || true
 systemctl --global enable armada-sm8250-audio-mixers.service
 systemctl --global enable armada-sm8250-audio.service
+systemctl --global enable armada-sm8250-audio-monitor.service
 systemctl enable armada-sm8250-audio-keepalive.timer
 systemctl enable inputplumber.service
 systemctl enable armada-device-quirks.service
