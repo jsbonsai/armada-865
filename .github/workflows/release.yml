@@ -1,0 +1,62 @@
+name: Publish release
+# Take a finished "Build disk image" run, split its image under GitHub's 2 GiB
+# release-asset cap, and publish a GitHub Release — no local downloads needed.
+on:
+  workflow_dispatch:
+    inputs:
+      disk_run_id:
+        description: "Run ID of a green 'Build disk image' workflow"
+        required: true
+      tag:
+        description: "Release tag (e.g. v0.1.0-beta)"
+        required: true
+      title:
+        description: "Release title"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout (for release notes)
+        uses: actions/checkout@v4
+
+      - name: Download disk image artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p out
+          gh run download "${{ inputs.disk_run_id }}" \
+            --repo "${{ github.repository }}" \
+            --name armada-disk-image --dir out
+          ls -lah out/
+
+      - name: Split under the 2 GiB asset cap + checksums
+        run: |
+          cd out
+          # Normalize: one file expected (img.gz / zip); split anything >1.9G.
+          for f in *; do
+            if [ "$(stat -c%s "$f")" -gt 2000000000 ]; then
+              split -b 1900M -d --additional-suffix=.part "$f" "$f."
+              rm -f "$f"
+            fi
+          done
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY_FILE=.github/RELEASE_BODY.md
+          [ -f "$BODY_FILE" ] || { echo "Armada-865 image build." > /tmp/body.md; BODY_FILE=/tmp/body.md; }
+          gh release create "${{ inputs.tag }}" out/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.title != '' && inputs.title || inputs.tag }}" \
+            --notes-file "$BODY_FILE" \
+            --prerelease
