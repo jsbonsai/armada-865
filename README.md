@@ -18,9 +18,12 @@ What you get: native ARM64 Steam with the gamepad UI, CachyOS Proton + FEX for
 x86/Windows games, Vulkan via freedreno/turnip on the Adreno 650, power profiles
 in the quick-access menu, Decky — with Android left intact on internal storage.
 
-> ⚠️ **Early community beta.** Runs from microSD; flashing the bootloader (one
-> time, reversible with the backup it makes) is required, and carries the same
-> risks as any bootloader flash. Expect bugs — and please report them.
+> ⚠️ **Early community beta.** Expect bugs — and please report them.
+>
+> **Completely non-invasive:** runs entirely from microSD using the **stock
+> Retroid bootloader's boot menu** — no bootloader flashing, no root, nothing
+> written to the device. Remove the SD card and it's exactly the phone-stock
+> handheld it was.
 >
 > **Default credentials:** user `armada`, password `armada`. If you enable SSH,
 > change the password.
@@ -30,7 +33,7 @@ in the quick-access menu, Decky — with Android left intact on internal storage
 ## Install
 
 You need: a 64 GB+ microSD (A2 class recommended), a PC to flash it, and your
-RP5 / Flip 2 with working Android.
+RP5 / Flip 2.
 
 **1. Flash the Armada-865 image to the SD card.**
 Download from **[Releases](../../releases)**, flash with balenaEtcher /
@@ -38,25 +41,17 @@ Raspberry Pi Imager / `dd`. The image auto-expands to fill the card on first
 boot. (If the release is split into parts, joining instructions are in the
 release notes.)
 
-**2. Flash the ROCKNIX ABL bootloader (one-time, from Android).**
-The SD card's FAT partition contains a `rocknix_abl` folder:
+**2. Boot Armada.**
 
-- Insert the SD, boot into Android, and copy `rocknix_abl` to internal storage.
-- Using the device's "run script as root" tool, browse into **`rocknix_abl/SM8250`**
-  (both RP5 and Flip 2 are SM8250 — flashing another SoC's ABL can brick).
-- Run **`backup_abl.sh`** first and copy the resulting `abl_a.img`/`abl_b.img`
-  to your PC — this is your undo button.
-- Run **`flash_abl.sh`**.
-
-**3. Boot Armada.**
-
-- Reboot **holding Volume Up** → boot menu → boot from SD → **GRUB menu**.
-- Select **your device** (RP5 or Flip 2 — wrong entry = black screen; reboot and
-  pick again).
+- Insert the SD card and reboot **holding Volume Up** → the stock boot menu
+  appears → boot from SD → **GRUB menu**.
+- Select **your device** (RP5 or Flip 2 — the wrong entry means a black screen;
+  just reboot and pick again).
 - First boot takes a few minutes (filesystem expansion, Steam setup).
 
-Android still boots normally whenever you don't go through the SD path — and
-restoring your backed-up ABL returns the device to fully stock.
+Boot without the SD (or without holding Vol+) and you're in stock Android as
+always. (The image also carries a `rocknix_abl` folder inherited from upstream's
+AYN/AYANEO install flow — **Retroid SM8250 devices don't need it**; ignore it.)
 
 ## What works
 
