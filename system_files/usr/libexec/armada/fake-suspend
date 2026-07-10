@@ -121,7 +121,7 @@ resume_runtime_pm() {
 }
 
 # The power key is left ungrabbed by block_input; wait_for_wake grabs it instead.
-INPUT_WHITELIST='pmic_pwrkey'
+INPUT_WHITELIST='pmic_pwrkey|pm8941_pwrkey'
 
 power_device() {
     local dev name
