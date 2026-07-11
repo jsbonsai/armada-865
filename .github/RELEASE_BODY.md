@@ -8,12 +8,15 @@ fork differs from upstream Armada.
 
 ## Install (fully non-invasive — nothing is written to your device)
 
-1. **Reassemble the image if it's split:** download all `*.part` files, then:
-   - Linux/macOS: `cat armada-*.part > armada.img.zip` (or the matching name)
-   - Windows (PowerShell): `cmd /c copy /b "armada-*.part" armada.img.zip`
-   Verify with `sha256sum -c SHA256SUMS` if you like.
-2. Unzip if needed, then **flash the image** to a 64 GB+ microSD with
-   balenaEtcher / Raspberry Pi Imager / `dd`. It auto-expands on first boot.
+1. **Download every part** (`.split.zip` + `.z01`, `.z02`, …) into one folder,
+   then open the **`.split.zip`** file with 7-Zip / Windows Explorer / macOS
+   Archive Utility / `unzip` and extract — you'll get one `armada-*.img.gz`.
+   (Verify downloads with `sha256sum -c SHA256SUMS` if you like.)
+2. **Flash `armada-*.img.gz`** to a 64 GB+ microSD with **balenaEtcher or
+   Raspberry Pi Imager** (both take the `.img.gz` directly — recommended).
+   Rufus users: decompress to `.img` first and use its "DD Image" mode; do NOT
+   use any partition-scheme/format options — the image contains its own GPT
+   layout. It auto-expands on first boot.
 3. Insert the SD, reboot **holding Volume Up** → boot from SD → in GRUB pick
    **your device** (wrong entry = black screen; reboot, pick again).
 4. First boot takes a few minutes. Default login: `armada` / `armada`.

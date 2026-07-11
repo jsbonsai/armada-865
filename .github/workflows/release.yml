@@ -39,10 +39,12 @@ jobs:
       - name: Split under the 2 GiB asset cap + checksums
         run: |
           cd out
-          # Normalize: one file expected (img.gz / zip); split anything >1.9G.
+          # Use a standard multipart ZIP (.zip + .z01 + ...): 7-Zip / Windows
+          # Explorer / macOS unzip all reassemble it natively. Raw `split`
+          # .part files confused testers (7-Zip half-decompresses part 00).
           for f in *; do
             if [ "$(stat -c%s "$f")" -gt 2000000000 ]; then
-              split -b 1900M -d --additional-suffix=.part "$f" "$f."
+              zip -0 -s 1900m "${f%.gz}.split.zip" "$f"
               rm -f "$f"
             fi
           done
