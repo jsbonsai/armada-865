@@ -51,10 +51,15 @@ release notes.)
   and pick again).
 - First boot takes a few minutes (filesystem expansion, Steam setup).
 
-> **Mini V2 note:** the U-Boot and GRUB *boot menus* render garbled on the Mini
-> V2 (the bootloader runs before Linux knows the panel) — it's cosmetic and
-> still navigable. Once SteamOS loads, the display is correct. The Mini V2 entry
-> is the **third** option in the GRUB list.
+> **Mini V2 notes:**
+> - The U-Boot and GRUB *boot menus* render garbled (the bootloader runs before
+>   Linux knows the panel) — cosmetic and still navigable. The Mini V2 entry is
+>   the **third** option in the GRUB list. SteamOS itself displays correctly.
+> - **First-time scaling:** the Mini's near-square screen makes the Steam UI
+>   oversized/cut-off by default. Fix it once: **Settings → Display →** turn off
+>   *Automatically Scale Interface* and lower the scale slider to ~50%.
+> - Widescreen games letterbox (black bars) on the square panel — expected; on
+>   the black bezel they largely disappear.
 
 Boot without the SD (or without holding Vol+) and you're in stock Android as
 always. (The image also carries a `rocknix_abl` folder inherited from upstream's
