@@ -31,11 +31,16 @@ Boot without the card (or without Vol+) and you're back in stock Android.
 - **Double-tap Home** opens the Steam quick-access menu on both devices (the
   Flip 2 has no dedicated Back button). The brief Steam-menu flicker on
   double-tap is cosmetic.
+- **Flip 2 lid**: close to sleep, open to wake (validated).
+- **Max performance**: set BOTH performance controls to Performance — the
+  SteamOS performance side-panel AND Armada Control (QAM → Decky → Armada
+  Control → Edit power profile).
 - Battery %, power profiles (QAM → Armada Control), Decky, rumble (Flip 2).
 
 ## Known issues / quirks
 
 - Double-tap Home flashes the Steam menu briefly before the panel opens.
+- A game may start silent: tap Home once (open/close the Steam menu) and audio kicks in. Tracked.
 - Wi-Fi MAC address changes every boot (router reservations won't stick).
 - Headphone jack and Bluetooth are not yet validated.
 - If the screen looks "dead" after boot: it may be the saved backlight level —

@@ -62,9 +62,25 @@ Proton/FEX — tested: Hades, Castle Crashers, DMC4, L4D2, MK9. Rumble works on
 Flip 2. Ballpark: Hades ~55–60 fps @ 720p on Performance; 2000s/2010s titles are
 the sweet spot (figure ~40–50% of an SM8550 device's CPU).
 
-**In progress:** sleep/wake (fake-suspend), Flip 2 quick-access button (it has
-one fewer button than the RP5), headphone jack & Bluetooth validation, RP5
-rumble.
+**Quick-access menu:** on the RP5, press **Back** or **double-tap Home**; on
+the Flip 2 (which has no Back button), **double-tap Home**. The brief Steam-menu
+flicker on double-tap is cosmetic.
+
+**Sleep/wake:** short-press power to sleep, press again to wake (instant). The
+Flip 2 also sleeps on **lid close** and wakes on lid open.
+
+**Getting the most performance:** there are currently *two* performance
+controls, and for max FPS set **both** to Performance:
+1. The SteamOS **Performance side-panel** (QAM → gear/performance tab).
+2. **Armada Control** (QAM → Decky/plug icon → Armada Control → Edit power
+   profile) — this one lifts the CPU underclock (Balanced caps the prime core
+   ~25% below max, which especially slows game launches).
+
+**Known quirk — silent game launch:** if a game starts with no sound, tap the
+**Home** button once (open and close the Steam menu) — audio kicks in. Being
+tracked.
+
+**In progress / not yet validated:** headphone jack, Bluetooth, RP5 rumble.
 
 ---
 
