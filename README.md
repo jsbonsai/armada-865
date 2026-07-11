@@ -175,13 +175,21 @@ enabled at image build.
 
 ## Reporting issues
 
-Open a GitHub issue with device, image version, what happened — and if you can
-SSH (`armada@<device-ip>`; IP shown in Steam's network settings), attach:
+Open a GitHub issue with your device, the image version, and what happened.
+
+**Attaching logs (optional but very helpful):** SSH is **off by default**. To
+enable it: from the Steam UI, **STEAM → Power → Switch to Desktop**, open
+**Konsole**, and run `sudo systemctl enable --now sshd` (password `armada`).
+Then from another computer, `ssh armada@<device-ip>` (IP is in Steam's network
+settings) and attach:
 
 ```
 journalctl -t sm8250-audio -t sm8250-audio-monitor -t sm8250-audio-keepalive -b
 sudo dmesg | grep -iE 'q6asm|q6adm|wsa88'
 ```
+
+> Leaving SSH enabled with the default `armada` password lets anyone on your
+> network log in — change the password (`passwd`) or disable SSH again when done.
 
 ## Building it yourself
 
