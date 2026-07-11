@@ -15,6 +15,11 @@ matches:
       attributes:
         - name: model
           value: Retroid Pocket Flip2
+  - udev:
+      sys_path: /sys/firmware/devicetree/base
+      attributes:
+        - name: model
+          value: Retroid Pocket Mini V2
 
 single_source: false
 
