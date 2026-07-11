@@ -8,7 +8,8 @@ ported to and maintained for:
 |---|---|
 | **Retroid Pocket 5** | ✅ Primary target, most tested |
 | **Retroid Pocket Flip 2** | ✅ Boots & plays; minor papercuts (see below) |
-| Retroid Pocket Mini / Mini v2 | 🔜 Planned (same SoC; device trees exist in ROCKNIX) |
+| **Retroid Pocket Mini V2** | ✅ Boots & plays — the near-square 1080×1240 "smallest SteamOS handheld" |
+| Retroid Pocket Mini (v1) | 🔜 Planned (device tree exists in ROCKNIX) |
 
 Upstream Armada targets SM8550/SM8650/SM8750 devices. This fork exists because
 SM8250 needs its own kernel enablement, a **different boot architecture**, and a
