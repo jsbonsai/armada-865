@@ -7,7 +7,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 ARMADA_LIB="${REPO_ROOT}/system_files/usr/lib/armada"
 DTB_LIST="${ARMADA_LIB}/supported-dtbs"
-SM8250_DTBS=(sm8250-retroidpocket-rp5 sm8250-retroidpocket-flip2)
+SM8250_DTBS=(sm8250-retroidpocket-rp5 sm8250-retroidpocket-flip2 sm8250-retroidpocket-rpminiv2)
 
 [[ -f "${RAW}" ]] || { echo "raw image not found: ${RAW}"; exit 1; }
 [[ -r "${DTB_LIST}" ]] || { echo "missing ${DTB_LIST}"; exit 1; }
@@ -69,6 +69,13 @@ menuentry 'Retroid Pocket Flip 2' {
     linux /KERNEL ${CMDLINE}
     initrd /INITRD
     devicetree /boot/grub/sm8250-retroidpocket-flip2.dtb
+}
+
+menuentry 'Retroid Pocket Mini V2' {
+    search --set -f /KERNEL
+    linux /KERNEL ${CMDLINE}
+    initrd /INITRD
+    devicetree /boot/grub/sm8250-retroidpocket-rpminiv2.dtb
 }
 EOF
 
