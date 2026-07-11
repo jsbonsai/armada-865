@@ -46,9 +46,15 @@ release notes.)
 
 - Insert the SD card and reboot **holding Volume Up** → the stock boot menu
   appears → boot from SD → **GRUB menu**.
-- Select **your device** (RP5 or Flip 2 — the wrong entry means a black screen;
-  just reboot and pick again).
+- Select **your device**: *Retroid Pocket 5*, *Retroid Pocket Flip 2*, or
+  *Retroid Pocket Mini V2* (the wrong entry means a black screen — just reboot
+  and pick again).
 - First boot takes a few minutes (filesystem expansion, Steam setup).
+
+> **Mini V2 note:** the U-Boot and GRUB *boot menus* render garbled on the Mini
+> V2 (the bootloader runs before Linux knows the panel) — it's cosmetic and
+> still navigable. Once SteamOS loads, the display is correct. The Mini V2 entry
+> is the **third** option in the GRUB list.
 
 Boot without the SD (or without holding Vol+) and you're in stock Android as
 always. (The image also carries a `rocknix_abl` folder inherited from upstream's
