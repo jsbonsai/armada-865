@@ -49,7 +49,7 @@ choose to flash a bootloader — this installer never does.)
 SSH in (or open a terminal) and run, as root:
 
 ```bash
-sudo /usr/libexec/armada/armada-install-internal
+sudo /usr/libexec/armada/armada-865-install-internal
 ```
 
 ### Choosing the storage split
@@ -59,19 +59,19 @@ split, pass exactly one of:
 
 ```bash
 # Give Android 32 GiB, Armada gets the rest:
-sudo /usr/libexec/armada/armada-install-internal --android-size 32
+sudo /usr/libexec/armada/armada-865-install-internal --android-size 32
 
 # Or size Armada directly (Android keeps the remainder):
-sudo /usr/libexec/armada/armada-install-internal --armada-size 90
+sudo /usr/libexec/armada/armada-865-install-internal --armada-size 90
 ```
 
 Add `--yes` to skip the confirmation prompt (useful over a flaky SSH link):
 
 ```bash
-sudo /usr/libexec/armada/armada-install-internal --android-size 32 --yes
+sudo /usr/libexec/armada/armada-865-install-internal --android-size 32 --yes
 ```
 
-Full options: `armada-install-internal --help`.
+Full options: `armada-865-install-internal --help`.
 
 ### What you'll see
 
@@ -117,9 +117,9 @@ refuses to run on top of an existing internal Armada install.
 
 ```bash
 # From the SD system: remove Armada's partitions but leave the freed space empty…
-sudo /usr/libexec/armada/armada-uninstall-internal --keep-free
+sudo /usr/libexec/armada/armada-865-uninstall-internal --keep-free
 # …then reinstall (it reclaims the freed tail automatically):
-sudo /usr/libexec/armada/armada-install-internal --armada-size 90
+sudo /usr/libexec/armada/armada-865-install-internal --armada-size 90
 ```
 
 > `--keep-free` skips growing Android back, so the reinstall is quick — the
@@ -131,14 +131,14 @@ To fully back out and return the internal storage to a stock-sized Android:
 
 ```bash
 # From the SD system (this is the default mode):
-sudo /usr/libexec/armada/armada-uninstall-internal
+sudo /usr/libexec/armada/armada-865-uninstall-internal
 ```
 
 This deletes `ARMADA_ESP` + `ARMADA_ROOT`, grows Android `userdata` back over the
 whole disk, and wipes it so **Android reformats it full-size on next boot**. Then
 power on **without** Vol+ to boot Android (it re-initialises storage).
 
-> ⚠️ **`armada-uninstall-internal` is newer than the installer and not yet as
+> ⚠️ **`armada-865-uninstall-internal` is newer than the installer and not yet as
 > thoroughly hardware-validated** — it backs up the GPT first (so a bad run is
 > recoverable with `--load-backup`), but treat it as beta until it has been
 > exercised end-to-end.
@@ -170,7 +170,7 @@ rollback (its data was already gone).
   Retroid Pocket 5 (SM8250). Other SM8250 units may differ; don't assume.
 - The installer refuses to run if it finds an existing internal Armada/ROCKNIX
   install (`ARMADA_ESP`/`ARMADA_ROOT`/`ROCKNIX`/…). Remove it first with
-  `armada-uninstall-internal --keep-free` (see "Reinstall / try again" above).
+  `armada-865-uninstall-internal --keep-free` (see "Reinstall / try again" above).
 - It requires that Android `userdata` is the last partition on the internal disk
   (the stock RP5 layout) and refuses otherwise.
 - It writes a GPT backup to `/root/` on the SD system — copy it somewhere safe if

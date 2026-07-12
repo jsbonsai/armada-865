@@ -1,6 +1,6 @@
 #!/usr/bin/bash
-# armada-uninstall-internal — remove an internal Armada install from the RP5's
-# UFS storage, undoing armada-install-internal. Run from the SD card, as root.
+# armada-865-uninstall-internal — remove an internal Armada install from the RP5's
+# UFS storage, undoing armada-865-install-internal. Run from the SD card, as root.
 #
 # STATUS: DRAFTED, NOT YET HARDWARE-VALIDATED (2026-07-11). Review
 #   docs/notes/internal-install-TODO.md  before relying on it. The GPT is ALWAYS
@@ -17,7 +17,7 @@
 #          next boot (a clean factory state). This is the "give the space back to
 #          Android / full undo" path.
 #        --keep-free       — leaves the freed space unallocated so you can re-run
-#          armada-install-internal immediately (the "reinstall / try again" path).
+#          armada-865-install-internal immediately (the "reinstall / try again" path).
 #
 # After a reclaim: boot Android (power on WITHOUT holding Vol+) and let it
 # re-initialise storage. The SD card still boots Armada, unchanged.
@@ -42,7 +42,7 @@ INHIBIT_PID=""
 
 usage() {
     cat >&2 <<EOF
-Usage: armada-uninstall-internal [options]
+Usage: armada-865-uninstall-internal [options]
 
 Removes an internal Armada install (ARMADA_ESP + ARMADA_ROOT) from the RP5's
 internal storage. Run from the SD card, as root. Touches no bootloader.
@@ -51,7 +51,7 @@ Mode (choose at most one; default: reclaim):
   --reclaim             grow Android userdata back over the freed space and let
                         Android reformat it full-size (full undo)  [default]
   --keep-free           leave the freed space unallocated, ready for a fresh
-                        armada-install-internal (reinstall / try again)
+                        armada-865-install-internal (reinstall / try again)
 
 Other options:
   --device /dev/sdX     internal disk (default: autodetected = ${DEVICE:-<none>})
@@ -218,7 +218,7 @@ EOF
 EOF
     else
         cat <<EOF
-  Freed space       : left UNALLOCATED (re-run armada-install-internal to reuse)
+  Freed space       : left UNALLOCATED (re-run armada-865-install-internal to reuse)
   Android userdata  : unchanged (stays its current size)
 EOF
     fi
@@ -307,5 +307,5 @@ Internal Armada install removed.
   * The SD card is untouched and still boots Armada.
 EOF
 if [[ $MODE == keep-free ]]; then
-    echo "  * To reinstall: sudo /usr/libexec/armada/armada-install-internal"
+    echo "  * To reinstall: sudo /usr/libexec/armada/armada-865-install-internal"
 fi

@@ -120,11 +120,11 @@ from SD, not internal), and root access.
 
 ```bash
 # Default split: Android keeps ~20 GiB, Armada gets the rest
-sudo /usr/libexec/armada/armada-install-internal
+sudo /usr/libexec/armada/armada-865-install-internal
 
 # Or choose the split (pass at most one):
-sudo /usr/libexec/armada/armada-install-internal --android-size 32
-sudo /usr/libexec/armada/armada-install-internal --armada-size 90
+sudo /usr/libexec/armada/armada-865-install-internal --android-size 32
+sudo /usr/libexec/armada/armada-865-install-internal --armada-size 90
 ```
 
 It backs up the partition table first, prints the exact plan, asks for
@@ -139,15 +139,15 @@ installer; to fully back out, remove it and give the space back to Android:
 
 ```bash
 # Try again with a different split: remove, leave the space free, reinstall
-sudo /usr/libexec/armada/armada-uninstall-internal --keep-free
-sudo /usr/libexec/armada/armada-install-internal --armada-size 90
+sudo /usr/libexec/armada/armada-865-uninstall-internal --keep-free
+sudo /usr/libexec/armada/armada-865-install-internal --armada-size 90
 
 # Undo entirely: remove Armada and grow Android back to full size
-sudo /usr/libexec/armada/armada-uninstall-internal
+sudo /usr/libexec/armada/armada-865-uninstall-internal
 ```
 
 Or simply re-insert the SD and boot it — it is never modified.
-(`armada-uninstall-internal` backs up the GPT first but is newer than the
+(`armada-865-uninstall-internal` backs up the GPT first but is newer than the
 installer; treat it as beta.)
 
 Full walkthrough and rollback details:

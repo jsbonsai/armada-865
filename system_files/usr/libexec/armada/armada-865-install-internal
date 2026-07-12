@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-# armada-install-internal — install the running Armada (SD) system onto the RP5's
+# armada-865-install-internal — install the running Armada (SD) system onto the RP5's
 # internal UFS storage so it boots fully from internal with the SD removed.
 #
 # This is the productized form of the validated manual runbook
@@ -63,7 +63,7 @@ INHIBIT_PID=""
 
 usage() {
     cat >&2 <<EOF
-Usage: armada-install-internal [options]
+Usage: armada-865-install-internal [options]
 
 Installs the running Armada system onto internal UFS storage (keeps Android,
 which is factory-reset). Needs NO bootloader flash. Run from the SD, as root.
@@ -184,7 +184,7 @@ detect_existing() {
     while IFS=$'\t' read -r num s e name; do
         case "$name" in
             ARMADA_ESP|ARMADA_ROOT|ARMADA_BOOT|ROCKNIX|STORAGE)
-                die "found existing '$name' (partition #$num) on $DEVICE — an internal install already exists. Remove it first with: armada-uninstall-internal --keep-free  (then re-run), or undo entirely with: armada-uninstall-internal" ;;
+                die "found existing '$name' (partition #$num) on $DEVICE — an internal install already exists. Remove it first with: armada-865-uninstall-internal --keep-free  (then re-run), or undo entirely with: armada-865-uninstall-internal" ;;
         esac
     done < <(list_partitions)
 }
@@ -201,7 +201,7 @@ find_userdata() {
     # Absolute last usable sector of the whole disk (secondary-GPT tail excluded).
     # require_userdata_last() proves nothing lives past userdata, so the Armada
     # root may claim the entire tail — including free space left by earlier deleted
-    # partitions (e.g. a previous install removed with `armada-uninstall-internal --keep-free`),
+    # partitions (e.g. a previous install removed with `armada-865-uninstall-internal --keep-free`),
     # which lies *after* UD_END and would be stranded if we bounded at UD_END_MIB.
     local last_sec
     last_sec=$(sgdisk -p "$DEVICE" 2>/dev/null | sed -n 's/.*last usable sector is \([0-9]*\).*/\1/p')
