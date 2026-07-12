@@ -41,6 +41,7 @@ dnf5 -y install --setopt=install_weak_deps=False \
     gdisk \
     binutils \
     xz \
+    bzip2-libs \
     dracut \
     dracut-config-generic \
     plymouth \
