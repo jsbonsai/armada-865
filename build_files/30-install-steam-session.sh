@@ -92,6 +92,10 @@ STEAM_HOME="${STEAM_BOOTSTRAP_HOME}/.local/share/Steam"
 STEAM_BOOTSTRAP_HOME="${STEAM_BOOTSTRAP_HOME}" bash /ctx/build_files/generate-steam-bootstrap.sh
 rm -f /etc/steamos-oobe-image
 
+# PINNED to 20260602 (DXVK 2.7.1). Do NOT bump past this without a650 gate-testing:
+# proton-cachyos 20260702 ships DXVK 3.0.1, which requires the Vulkan feature
+# storageBuffer8BitAccess — turnip/Adreno-650 does not expose it, so every D3D10/11
+# game fails ("DXVK: No adapters found"). See docs/notes/rp5-perf-sprint-status.md.
 PROTON_VER="11.0-20260602-slr"
 PROTON_ARCHIVE_NAME="proton-cachyos-${PROTON_VER}-arm64"
 # Keep this in sync with armada-fixups when changing Proton major/minor lines.
