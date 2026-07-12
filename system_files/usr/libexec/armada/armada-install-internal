@@ -1,0 +1,564 @@
+#!/usr/bin/bash
+# armada-install-internal — install the running Armada (SD) system onto the RP5's
+# internal UFS storage so it boots fully from internal with the SD removed.
+#
+# This is the productized form of the validated manual runbook
+#   docs/research/ostree-internal-deploy.md  (ostree deploy to internal ROOT)
+#   docs/research/internal-flashing-SYNTHESIS.md  (the probe that proved no
+#   bootloader flash is needed on the RP5)
+#
+# What it does, faithful to that runbook — NO new mechanisms:
+#   1. Backs up the internal GPT (rollback insurance).
+#   2. Shrinks the last Android partition (userdata) and, in the freed space,
+#      creates ARMADA_ESP (2 GiB FAT32, boot+esp) and ARMADA_ROOT (btrfs, rest).
+#      super / xbl / abl / boot / vbmeta are never touched.
+#   3. Stages the ESP by COPYING the running SD's /boot/efi payload
+#      (BOOTAA64.EFI + DTBs + grub.cfg + KERNEL + INITRD). No bootloader is flashed
+#      — stock RP5 UEFI boots a boot-flagged internal ESP (proven: BootCurrent=scsi0).
+#   4. ostree admin deploy (pull-local of the booted commit) into ARMADA_ROOT, with
+#      /boot as a plain directory on the root subvol (no separate /boot partition).
+#   5. Writes fstab (/boot/efi + /var + /var/home only), copies the bootc origin,
+#      rewrites the BLS entry for root=UUID=<ARMADA_ROOT> (no boot= karg), and
+#      regenerates the ESP payload via armada-grub-efi-update (repoints GRUB at
+#      internal). BOOTAA64.EFI + DTBs are preserved.
+#
+# Recovery is "boot the SD and undo" — no EDL/XBL/ABL bytes are written. See the
+# user guide: docs/notes/internal-install-user-guide.md
+#
+# Run from the running SD system, as root.
+
+set -euo pipefail
+
+# ---- shared helpers (same the shipped tooling uses) -------------------------
+source /usr/lib/armada/bootimg-args     # armada_default_bls_entry
+source /usr/lib/armada/storage-lib      # armada_internal_device
+
+ARMADA_REGISTRY="ghcr.io/virtudude/armada"
+ESP_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+# ESP is 2 GiB FAT32 (ROCKNIX geometry — the size/format proven to boot on the
+# RP5), NOT the upstream installer's 512 MiB FAT16.
+ESP_MIB=2048
+# Floors, not targets. Root floor = room for two bootc deployments + OTA staging.
+ROOT_MIN_MIB=$((8 * 1024))
+ANDROID_MIN_MIB=$((8 * 1024))
+# Default split: leave Android ~20 GiB, Armada gets the rest.
+ANDROID_DEFAULT_MIB=$((20 * 1024))
+
+BTRFS_OPTS="noatime,compress=zstd:1,discard=async,space_cache=v2"
+GRUB_EFI_UPDATE=/usr/libexec/armada/armada-grub-efi-update
+
+# ---- CLI --------------------------------------------------------------------
+DEVICE="${ARMADA_INTERNAL_DEVICE:-$(armada_internal_device || true)}"
+ASSUME_YES=0
+ANDROID_GIB=""
+ARMADA_GIB=""
+GPT_BACKUP=""
+SD_ESP="/boot/efi"          # the running SD's mounted ESP (staging source)
+
+# ---- run state (for cleanup) ------------------------------------------------
+destructive=0
+TARGET=""
+INHIBIT_PID=""
+
+usage() {
+    cat >&2 <<EOF
+Usage: armada-install-internal [options]
+
+Installs the running Armada system onto internal UFS storage (keeps Android,
+which is factory-reset). Needs NO bootloader flash. Run from the SD, as root.
+
+Storage split (choose at most one; default: Android ~20 GiB, Armada the rest):
+  --android-size GB     size to leave the Android userdata partition
+  --armada-size GB      size to give Armada (Android keeps the rest)
+
+Other options:
+  --device /dev/sdX     internal disk (default: autodetected = ${DEVICE:-<none>})
+  --gpt-backup PATH     where to write the GPT backup (default: /root/…)
+  -y, --yes             skip the confirmation prompt
+  -h, --help            this help
+EOF
+    exit "${1:-2}"
+}
+
+die()  { echo "ERROR: $*" >&2; exit 1; }
+step() { echo; echo ">>> $*"; }
+
+# ---- lifecycle --------------------------------------------------------------
+# Surfaced only after internal storage was modified, so a mid-run failure tells
+# the user how to recover rather than leaving a silent half-install.
+cleanup() {
+    local rc=$?
+    [[ -n "$INHIBIT_PID" ]] && kill "$INHIBIT_PID" 2>/dev/null || true
+    [[ -n "$TARGET" ]] && { umount -R "$TARGET" 2>/dev/null || true; rmdir "$TARGET" 2>/dev/null || true; }
+    if (( rc != 0 && destructive == 1 )); then
+        cat >&2 <<EOF
+
+ERROR: install did not finish after internal storage was modified.
+  Android was factory-reset but is otherwise intact; the internal ESP/ROOT may be
+  incomplete. Do NOT rely on internal boot yet.
+  Recover: re-insert the SD card, boot it (it is untouched), and re-run this
+  installer. To fully back out, restore the GPT backup:
+    sgdisk --load-backup=${GPT_BACKUP:-<backup>} ${DEVICE}
+EOF
+    fi
+    exit $rc
+}
+
+# Block suspend/idle for the whole run: a suspend mid-repartition/deploy could
+# corrupt the internal layout.
+inhibit_sleep() {
+    command -v systemd-inhibit >/dev/null 2>&1 || return 0
+    systemd-inhibit --what=sleep:idle --who="Armada Internal Installer" \
+        --why="writing internal storage" --mode=block sleep infinity &
+    INHIBIT_PID=$!
+}
+
+need_root() { [[ $EUID -eq 0 ]] || die "must run as root"; }
+
+need_cmds() {
+    local cmd missing=0
+    for cmd in blkid btrfs cp findmnt jq lsblk mkfs.btrfs mkfs.vfat ostree parted partprobe realpath sfdisk sgdisk udevadm; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: missing required command: $cmd" >&2; missing=1; }
+    done
+    (( missing == 0 )) || exit 1
+    [[ -x $GRUB_EFI_UPDATE ]] || die "missing $GRUB_EFI_UPDATE"
+}
+
+check_device() {
+    [[ -n $DEVICE ]] || die "could not determine internal storage; pass --device /dev/sdX"
+    [[ -b $DEVICE ]] || die "internal storage device $DEVICE not found"
+}
+
+# Refuse to modify the disk we booted from (must be booted from the SD).
+refuse_self() {
+    local src
+    src=$(findmnt -no SOURCE /sysroot 2>/dev/null || findmnt -no SOURCE /)
+    src=${src%%\[*}                       # btrfs root prints /dev/sdaN[/subvol]
+    src=$(readlink -f "$src" 2>/dev/null || echo "$src")
+    [[ -n $src ]] || die "cannot determine the boot device; refusing to modify $DEVICE"
+    case "$src" in
+        "$DEVICE"*) die "booted from $DEVICE; run this from the SD card, not internal storage" ;;
+    esac
+    echo "Booted from: $src (not $DEVICE) — OK"
+}
+
+# The staging source must be the SD ESP with the GRUB binary + DTBs.
+check_sd_esp() {
+    findmnt -rn "$SD_ESP" >/dev/null 2>&1 || die "$SD_ESP is not mounted; cannot stage the internal ESP"
+    [[ -f "$SD_ESP/EFI/BOOT/BOOTAA64.EFI" ]] \
+        || die "$SD_ESP/EFI/BOOT/BOOTAA64.EFI not found; the SD ESP has no GRUB binary to stage"
+}
+
+confirm() {
+    (( ASSUME_YES )) && return 0
+    local answer
+    read -rp "$1 [y/N]: " answer
+    [[ $answer =~ ^[Yy]$ ]]
+}
+
+# ---- partition table introspection -----------------------------------------
+part_node() {
+    local dev="$1" num="$2"
+    [[ $dev =~ [0-9]$ ]] && echo "${dev}p${num}" || echo "${dev}${num}"
+}
+
+# One TSV row per partition: NUM  START_BYTE  END_BYTE(inclusive)  NAME.
+# Parsed by key from sfdisk --json (handles the 4096-byte sectors on this disk),
+# not by column splitting — a ':' in a name would shift fields.
+list_partitions() {
+    sfdisk --json "$DEVICE" 2>/dev/null | jq -r '
+        .partitiontable as $t
+        | ($t.sectorsize // 512) as $ss
+        | ($t.partitions // [])[]
+        | [ (.node | match("[0-9]+$").string),
+            (.start * $ss),
+            ((.start + .size) * $ss - 1),
+            (.name // "") ]
+        | @tsv'
+}
+
+# Refuse if an existing Armada/ROCKNIX install is present (avoid double-install).
+detect_existing() {
+    local num s e name
+    while IFS=$'\t' read -r num s e name; do
+        case "$name" in
+            ARMADA_ESP|ARMADA_ROOT|ARMADA_BOOT|ROCKNIX|STORAGE)
+                die "found existing '$name' (partition #$num) on $DEVICE — an internal install already exists. Remove it first with: armada-installer reset" ;;
+        esac
+    done < <(list_partitions)
+}
+
+find_userdata() {
+    local ud_line
+    mapfile -t ud_line < <(list_partitions | awk -F'\t' '$4=="userdata"')
+    (( ${#ud_line[@]} == 1 )) || { parted -s "$DEVICE" print >&2; die "could not uniquely find the userdata partition on $DEVICE"; }
+    IFS=$'\t' read -r UD_NUM UD_START UD_END _ <<< "${ud_line[0]}"
+    UD_PART=$(part_node "$DEVICE" "$UD_NUM")
+    UD_START_MIB=$(( (UD_START + 1048575) / 1048576 ))   # round up
+    UD_END_MIB=$(( UD_END / 1048576 ))                    # round down
+    UD_ORIG_GIB=$(( (UD_END_MIB - UD_START_MIB) / 1024 ))
+}
+
+# userdata must be the last partition: we claim the freed tail and numbers
+# UD_NUM+1/+2. Refuse if anything lies after it.
+require_userdata_last() {
+    local num s e name
+    while IFS=$'\t' read -r num s e name; do
+        (( num == UD_NUM )) && continue
+        (( e > UD_END )) && { parted -s "$DEVICE" print >&2; die "partition #$num lies after userdata on $DEVICE; refusing (fresh install assumes userdata is last)"; }
+    done < <(list_partitions)
+}
+
+# ---- storage split ----------------------------------------------------------
+# Resolve the new Android userdata size (MiB) from flags / default, then validate.
+choose_split() {
+    local window_mib min_mib max_mib
+    window_mib=$(( UD_END_MIB - UD_START_MIB ))
+    min_mib=$ANDROID_MIN_MIB
+    # Leave ESP + a root floor for Armada.
+    max_mib=$(( window_mib - ESP_MIB - ROOT_MIN_MIB - 8 ))
+    (( max_mib >= min_mib )) || die "not enough internal space: need ~$(( (ESP_MIB + ROOT_MIN_MIB) / 1024 )) GiB free beyond Android's floor"
+
+    if [[ -n $ANDROID_GIB && -n $ARMADA_GIB ]]; then
+        die "pass at most one of --android-size / --armada-size"
+    elif [[ -n $ANDROID_GIB ]]; then
+        [[ $ANDROID_GIB =~ ^[0-9]+$ ]] || die "--android-size must be an integer"
+        NEW_UD_MIB=$(( ANDROID_GIB * 1024 ))
+    elif [[ -n $ARMADA_GIB ]]; then
+        [[ $ARMADA_GIB =~ ^[0-9]+$ ]] || die "--armada-size must be an integer"
+        NEW_UD_MIB=$(( window_mib - ESP_MIB - ARMADA_GIB * 1024 ))
+    else
+        NEW_UD_MIB=$ANDROID_DEFAULT_MIB
+        (( NEW_UD_MIB > max_mib )) && NEW_UD_MIB=$max_mib   # tiny disk: clamp down
+        (( NEW_UD_MIB < min_mib )) && NEW_UD_MIB=$min_mib
+    fi
+
+    (( NEW_UD_MIB >= min_mib && NEW_UD_MIB <= max_mib )) \
+        || die "requested split out of range: Android must be $(( min_mib / 1024 ))..$(( max_mib / 1024 )) GiB"
+
+    NEW_UD_END_MIB=$(( UD_START_MIB + NEW_UD_MIB ))
+    ESP_START_MIB=$NEW_UD_END_MIB
+    ESP_END_MIB=$(( ESP_START_MIB + ESP_MIB ))
+    ROOT_START_MIB=$ESP_END_MIB
+    ROOT_END_MIB=$UD_END_MIB
+    ARMADA_ROOT_GIB=$(( (ROOT_END_MIB - ROOT_START_MIB) / 1024 ))
+    NEW_UD_GIB=$(( NEW_UD_MIB / 1024 ))
+}
+
+# ---- GPT backup (mandatory) -------------------------------------------------
+backup_gpt() {
+    [[ -n $GPT_BACKUP ]] || GPT_BACKUP="/root/armada-gpt-backup-$(date +%Y%m%d-%H%M%S).bin"
+    mkdir -p "$(dirname "$GPT_BACKUP")"
+    sgdisk --backup="$GPT_BACKUP" "$DEVICE" >/dev/null \
+        || die "GPT backup failed; refusing to continue"
+    [[ -s $GPT_BACKUP ]] || die "GPT backup is empty; refusing to continue"
+    echo "GPT backed up to: $GPT_BACKUP"
+    echo "  (restore with:  sgdisk --load-backup=$GPT_BACKUP $DEVICE )"
+}
+
+# ---- partitioning -----------------------------------------------------------
+partition_disk() {
+    local esp_num root_num
+    esp_num=$(( UD_NUM + 1 ))
+    root_num=$(( UD_NUM + 2 ))
+
+    findmnt -n "$UD_PART" >/dev/null 2>&1 && umount "$UD_PART" || true
+
+    # Past here Android userdata is being reshaped; arm the recovery message.
+    destructive=1
+
+    parted -s "$DEVICE" rm "$UD_NUM"
+    parted -a optimal -s "$DEVICE" mkpart primary ext4 "${UD_START_MIB}MiB" "${NEW_UD_END_MIB}MiB"
+    parted -s "$DEVICE" name "$UD_NUM" userdata
+
+    parted -a optimal -s "$DEVICE" mkpart primary fat32 "${ESP_START_MIB}MiB" "${ESP_END_MIB}MiB"
+    parted -s "$DEVICE" name "$esp_num" ARMADA_ESP
+    parted -s "$DEVICE" set "$esp_num" boot on
+    parted -s "$DEVICE" set "$esp_num" esp on
+    sgdisk --typecode="${esp_num}:${ESP_GUID}" "$DEVICE" >/dev/null
+
+    # Bound the btrfs at the old userdata end, never 100%: stays inside the freed
+    # window and never spans a trailing partition.
+    parted -a optimal -s "$DEVICE" mkpart primary btrfs "${ROOT_START_MIB}MiB" "${ROOT_END_MIB}MiB"
+    parted -s "$DEVICE" name "$root_num" ARMADA_ROOT
+
+    partprobe "$DEVICE" || true
+    udevadm settle
+
+    ESP_PART=$(part_node "$DEVICE" "$esp_num")
+    ROOT_PART=$(part_node "$DEVICE" "$root_num")
+    [[ -b $UD_PART   ]] || die "$UD_PART did not appear after partitioning"
+    [[ -b $ESP_PART  ]] || die "$ESP_PART did not appear after partitioning"
+    [[ -b $ROOT_PART ]] || die "$ROOT_PART did not appear after partitioning"
+
+    # Zero the new Android userdata superblock so Android factory-resets cleanly.
+    dd if=/dev/zero of="$UD_PART" bs=1M count=8 status=none
+}
+
+# ---- ESP staging (copy the proven SD payload; NO flash) ---------------------
+stage_esp() {
+    local mnt
+    findmnt -n "$ESP_PART" >/dev/null 2>&1 && umount "$ESP_PART" || true
+    # Fresh ESP → format FAT32 (2 GiB, proven-bootable geometry), then copy.
+    mkfs.vfat -F 32 -n ARMADA_ESP "$ESP_PART" >/dev/null
+    mnt=$(mktemp -d -t armada-esp.XXXXXX)
+    mount "$ESP_PART" "$mnt"
+    # Whole SD ESP tree: BOOTAA64.EFI, boot/grub/*.dtb, grub.cfg, KERNEL, INITRD.
+    # KERNEL/INITRD/grub.cfg get rewritten later by armada-grub-efi-update; the
+    # GRUB binary + DTBs are what we must preserve.
+    cp -a "$SD_ESP"/. "$mnt"/
+    sync
+    umount "$mnt"; rmdir "$mnt"
+}
+
+# ---- ostree deploy into ARMADA_ROOT ----------------------------------------
+format_root() {
+    local tmp
+    mkfs.btrfs -f -L root "$ROOT_PART" >/dev/null
+    tmp=$(mktemp -d -t armada-root.XXXXXX)
+    mount "$ROOT_PART" "$tmp"
+    btrfs subvolume create "$tmp/root" >/dev/null
+    btrfs subvolume create "$tmp/var"  >/dev/null
+    btrfs subvolume create "$tmp/home" >/dev/null
+    umount "$tmp"; rmdir "$tmp"
+}
+
+mount_root() {
+    TARGET=$(mktemp -d -t armada-internal.XXXXXX)
+    mount -o "${BTRFS_OPTS},subvol=root" "$ROOT_PART" "$TARGET"
+    mkdir -p "$TARGET/var";      mount -o "${BTRFS_OPTS},subvol=var"  "$ROOT_PART" "$TARGET/var"
+    mkdir -p "$TARGET/var/home"; mount -o "${BTRFS_OPTS},subvol=home" "$ROOT_PART" "$TARGET/var/home"
+    mkdir -p "$TARGET/boot"      # plain dir on the root subvol (no separate /boot)
+}
+
+# Reproduce the booted commit (+parent + container refs) — composefs-safe.
+copy_current_bootc_deployment() {
+    local parent ref tc
+    ostree pull-local --repo="$TARGET/ostree/repo" /sysroot/ostree/repo "$commit"
+    parent=$(ostree show --repo=/sysroot/ostree/repo "$commit" | sed -n 's/^Parent:[[:space:]]*//p' | head -n1)
+    [[ -n $parent ]] && ostree pull-local --repo="$TARGET/ostree/repo" /sysroot/ostree/repo "$parent"
+    while IFS= read -r ref; do
+        tc=$(ostree rev-parse --repo=/sysroot/ostree/repo "$ref" 2>/dev/null || true)
+        if [[ $tc == "$commit" || ( -n $parent && $tc == "$parent" ) ]]; then
+            ostree refs --repo="$TARGET/ostree/repo" --force --create="$ref" "$tc"
+        fi
+    done < <(ostree refs --repo=/sysroot/ostree/repo | sed -n 's#^\(ostree/container/\(image\|blob\)/.*\)#\1#p')
+}
+
+seed_var() {
+    # ostree admin deploy does not populate /var; seed it from the image commit so
+    # /var/home/armada lands with the image's ownership.
+    local varseed
+    varseed=$(mktemp -d -t armada-var.XXXXXX)
+    ostree checkout --repo="$TARGET/ostree/repo" --subpath=/var "$commit" "$varseed/v"
+    cp -a "$varseed/v/." "$TARGET/var/"
+    rm -rf "$varseed"
+}
+
+write_fstab() {
+    local deploy_dir
+    deploy_dir=$(find "$TARGET/ostree/deploy/default/deploy" -mindepth 1 -maxdepth 1 -type d -name "${commit}.*" | sort | tail -n1)
+    [[ -n $deploy_dir ]] || die "could not find ostree deploy dir"
+    mkdir -p "$deploy_dir/etc"
+    # NO /boot line (it is a dir on the root subvol). Keep /boot/efi so
+    # armada-grub-efi-update can mount + regen the ESP at shutdown.
+    cat > "$deploy_dir/etc/fstab" <<EOF
+UUID=${ESP_UUID} /boot/efi vfat umask=0077,shortname=winnt 0 2
+UUID=${ROOT_UUID} /var btrfs ${BTRFS_OPTS},subvol=var 0 0
+UUID=${ROOT_UUID} /var/home btrfs ${BTRFS_OPTS},subvol=home 0 0
+EOF
+}
+
+set_origin() {
+    # Anchor the container ref to the signed ghcr image so cosign verify + bootc
+    # upgrade work on the internal install; otherwise it silently never OTAs.
+    local src dst ref bare
+    src=$(ls /ostree/deploy/*/deploy/"${commit}".*.origin 2>/dev/null | head -n1) || true
+    dst=$(ls "$TARGET"/ostree/deploy/*/deploy/"${commit}".*.origin 2>/dev/null | head -n1) || true
+    if [[ -z $src || -z $dst ]]; then
+        echo "WARNING: could not set bootc origin; internal install will NOT receive OTA updates" >&2
+        return
+    fi
+    cp -f "$src" "$dst"
+    ref=$(sed -n 's/^container-image-reference=//p' "$dst" | head -1)
+    if [[ $ref != *${ARMADA_REGISTRY}* ]]; then
+        echo "WARNING: bootc origin is '${ref:-<none>}', not ${ARMADA_REGISTRY}; OTA will NOT verify (expected for a local build) — leaving as-is" >&2
+        return
+    fi
+    bare="${ARMADA_REGISTRY}${ref##*${ARMADA_REGISTRY}}"
+    sed -i "s|^container-image-reference=.*|container-image-reference=ostree-image-signed:docker://${bare}|" "$dst"
+}
+
+base_kargs() {
+    local f
+    for f in /usr/lib/bootc/kargs.d/*.toml; do
+        [[ -f $f ]] || continue
+        sed -n '/^kargs = \[/,/^\]/{s/^[[:space:]]*"\([^"]*\)",\?/\1/p}' "$f"
+    done
+}
+
+# Rewrite the just-deployed BLS entry for the INTERNAL root: root=UUID=<ROOT>,
+# rootflags=subvol=root, keep ostree=. Unlike the upstream installer, NO boot=
+# karg (there is no separate /boot partition).
+rewrite_bls() {
+    local entry version linux initrd ostree_arg options k bootdir
+    entry=$(armada_default_bls_entry "$TARGET/boot")
+    [[ -n $entry ]] || die "no BLS entry created"
+    version=$(sed -n 's/^version //p' "$entry" | head -1)
+    linux=$(sed  -n 's/^linux //p'  "$entry" | head -1)
+    initrd=$(sed -n 's/^initrd //p' "$entry" | head -1)
+    ostree_arg=$(grep -o 'ostree=[^ ]*' "$entry" | head -n1 || true)
+    [[ -n $linux && -n $initrd && -n $ostree_arg ]] || die "BLS entry incomplete"
+    [[ $linux  == /boot/* ]] || linux="/boot${linux}"
+    [[ $initrd == /boot/* ]] || initrd="/boot${initrd}"
+
+    options="root=UUID=${ROOT_UUID} rw"
+    while IFS= read -r k; do
+        [[ $k == rootflags=* ]] && continue     # we set our own subvol layout
+        options="${options} ${k}"
+    done < <(base_kargs)
+    options="${options} rootflags=subvol=root,${BTRFS_OPTS} ${ostree_arg}"
+
+    bootdir=$(dirname "$linux")
+    cat > "$entry" <<EOF
+title Armada
+version ${version:-1}
+options ${options}
+linux ${linux}
+initrd ${initrd}
+fdtdir ${bootdir}/dtb
+EOF
+}
+
+# Repoint GRUB at internal: rewrite ESP /KERNEL, /INITRD, and both grub.cfg from
+# the internal BLS entry. Preserves BOOTAA64.EFI + DTBs.
+regen_esp() {
+    mkdir -p "$TARGET/boot/efi"
+    mount "$ESP_PART" "$TARGET/boot/efi"
+    ESP="$TARGET/boot/efi" BOOTROOT="$TARGET/boot" "$GRUB_EFI_UPDATE"
+    sync
+}
+
+verify() {
+    local cfg="$TARGET/boot/efi/EFI/BOOT/grub.cfg"
+    local got
+    got=$(grep -o 'root=UUID=[0-9a-f-]*' "$cfg" 2>/dev/null | head -1 | sed 's/root=UUID=//')
+    [[ $got == "$ROOT_UUID" ]] || die "verify: ESP grub.cfg root=UUID ($got) != ARMADA_ROOT ($ROOT_UUID)"
+    if head -c 8 "$TARGET/boot/efi/KERNEL" 2>/dev/null | grep -q 'ANDROID!'; then
+        die "verify: ESP /KERNEL is an Android bootimg, not a raw kernel Image"
+    fi
+    [[ -f "$TARGET/boot/efi/EFI/BOOT/BOOTAA64.EFI" ]] || die "verify: BOOTAA64.EFI missing from staged ESP"
+    echo "Verified: ESP grub.cfg -> root=UUID=$ROOT_UUID, /KERNEL is a raw Image, GRUB binary present."
+}
+
+deploy_root() {
+    step "Formatting ARMADA_ROOT ($ROOT_PART) and creating subvols"
+    format_root
+    mount_root
+
+    step "Initialising the ostree sysroot"
+    ostree admin init-fs --modern "$TARGET"
+    ostree admin os-init --sysroot="$TARGET" default
+
+    commit=$(ostree admin status --json | jq -r '.deployments[]|select(.booted)|.checksum' | head -n1)
+    [[ -n $commit && $commit != null ]] || die "could not determine booted ostree commit"
+    echo "Booted commit: $commit"
+
+    step "Copying the booted commit into the internal repo (pull-local)"
+    copy_current_bootc_deployment
+
+    step "Deploying (writes BLS entry + ostree= karg)"
+    ostree admin deploy --no-merge --sysroot="$TARGET" --os=default "$commit"
+    seed_var
+
+    ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+    ESP_UUID=$(blkid  -s UUID -o value "$ESP_PART")
+
+    step "Writing fstab, bootc origin, and BLS entry (internal root)"
+    write_fstab
+    set_origin
+    rewrite_bls
+
+    step "Regenerating the ESP payload (repoints GRUB at internal)"
+    regen_esp
+    verify
+
+    step "Flushing and unmounting"
+    sync
+    umount -R "$TARGET"; rmdir "$TARGET"; TARGET=""
+}
+
+# ---- main -------------------------------------------------------------------
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --android-size) ANDROID_GIB="${2:-}"; shift ;;
+            --android-size=*) ANDROID_GIB="${1#*=}" ;;
+            --armada-size) ARMADA_GIB="${2:-}"; shift ;;
+            --armada-size=*) ARMADA_GIB="${1#*=}" ;;
+            --device) DEVICE="${2:-}"; shift ;;
+            --device=*) DEVICE="${1#*=}" ;;
+            --gpt-backup) GPT_BACKUP="${2:-}"; shift ;;
+            --gpt-backup=*) GPT_BACKUP="${1#*=}" ;;
+            -y|--yes) ASSUME_YES=1 ;;
+            -h|--help) usage 0 ;;
+            *) echo "ERROR: unknown argument: $1" >&2; usage ;;
+        esac
+        shift
+    done
+}
+
+main() {
+    parse_args "$@"
+    need_root
+    need_cmds
+    check_device
+    refuse_self
+    check_sd_esp
+    detect_existing
+
+    find_userdata
+    require_userdata_last
+    choose_split
+
+    cat <<EOF
+
+Plan for ${DEVICE} (4K-sector UFS):
+  Android userdata : ${UD_START_MIB} .. ${NEW_UD_END_MIB} MiB  (${NEW_UD_GIB} GiB, FACTORY-RESET)
+  ARMADA_ESP       : ${ESP_START_MIB} .. ${ESP_END_MIB} MiB  (${ESP_MIB} MiB FAT32, boot+esp)
+  ARMADA_ROOT      : ${ROOT_START_MIB} .. ${ROOT_END_MIB} MiB  (~${ARMADA_ROOT_GIB} GiB btrfs)
+
+  Android was ${UD_ORIG_GIB} GiB; super/xbl/abl/boot/vbmeta are NOT touched.
+  No bootloader is flashed. The SD card is not modified.
+  After install: power off, remove SD, power on, hold Vol+ to reach the internal
+  GRUB menu.
+
+EOF
+    confirm "Proceed with these destructive partition changes?" || { echo "Aborted."; exit 0; }
+
+    trap cleanup EXIT
+    inhibit_sleep
+
+    step "Backing up the internal GPT"
+    backup_gpt
+
+    step "Partitioning ${DEVICE} (shrink userdata; create ARMADA_ESP + ARMADA_ROOT)"
+    partition_disk
+
+    step "Staging ARMADA_ESP from the SD payload (no flash)"
+    stage_esp
+
+    deploy_root
+
+    cat <<EOF
+
+Install complete.
+  Power off, remove the SD card, then power on. Hold Vol+ through the Android
+  splash to reach the internal GRUB menu.
+  Rollback: re-insert the SD and boot it (untouched). GPT backup: ${GPT_BACKUP}
+
+EOF
+}
+
+main "$@"
