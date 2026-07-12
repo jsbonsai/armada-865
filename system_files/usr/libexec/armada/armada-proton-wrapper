@@ -111,6 +111,63 @@ def write_fex_config(settings, game_id, profiles):
         tmp.unlink(missing_ok=True)
 
 
+HELPER_THREADS = {"dxvk-cs", "dxvk-submit", "dxvk-queue", "wineserver"}
+
+
+def parse_cpu_list(spec):
+    cpus = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cpus.update(range(int(lo), int(hi) + 1))
+        elif part:
+            cpus.add(int(part))
+    return cpus
+
+
+def helper_affinity_watcher(proton_pid, cpus):
+    # EAS parks DXVK's per-frame helper threads (~30% util each) on the silver
+    # cluster while gold cores idle; dxvk-cs is on the critical path of every
+    # frame, so that placement costs whole-pipeline FPS (measured +16% avg on
+    # DMC4 when moved to gold). Game threads are never touched: the scheduler
+    # already places the main thread on prime correctly.
+    try:
+        os.sched_setaffinity(0, {0, 1, 2, 3})  # keep the watcher itself off big cores
+    except OSError:
+        pass
+    proc = pathlib.Path("/proc")
+    while pathlib.Path(f"/proc/{proton_pid}").exists():
+        for task in proc.glob("[0-9]*/task/[0-9]*"):
+            try:
+                if task.joinpath("comm").read_text().strip() in HELPER_THREADS:
+                    os.sched_setaffinity(int(task.name), cpus)
+            except (OSError, ValueError):
+                continue
+        time.sleep(5)
+
+
+def spawn_helper_affinity_watcher():
+    spec = os.environ.get("ARMADA_HELPER_CPUS", "4-6")
+    if spec.lower() in ("", "off", "none"):
+        return
+    cpus = parse_cpu_list(spec)
+    if not cpus or os.cpu_count() <= max(cpus):
+        return
+    proton_pid = os.getpid()  # execv keeps our PID: this becomes Proton
+    if os.fork() != 0:
+        return  # parent goes on to exec Proton
+    try:
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        helper_affinity_watcher(proton_pid, cpus)
+    finally:
+        os._exit(0)
+
+
 def main():
     if len(sys.argv) < 2:
         raise SystemExit("usage: armada-proton-wrapper PROTON_ENTRYPOINT [ARGS...]")
@@ -124,6 +181,11 @@ def main():
         write_fex_config(settings, game_id, contract["profiles"])
     except Exception as exc:
         print(f"armada-proton: failed to write FEX config: {exc}", file=sys.stderr)
+
+    try:
+        spawn_helper_affinity_watcher()
+    except Exception as exc:
+        print(f"armada-proton: affinity watcher failed: {exc}", file=sys.stderr)
 
     try:
         os.execv(real_proton, args)
