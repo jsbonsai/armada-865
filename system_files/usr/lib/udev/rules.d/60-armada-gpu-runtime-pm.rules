@@ -1,3 +1,14 @@
-# Keep the GPU runtime PM resident; the GMU wedges under rapid idle/resume churn.
-ACTION=="add",  SUBSYSTEM=="platform", KERNEL=="3d00000.gpu", TEST=="power/control", ATTR{power/control}="on"
-ACTION=="bind", SUBSYSTEM=="platform", KERNEL=="3d00000.gpu", TEST=="power/control", ATTR{power/control}="on"
+# GPU runtime PM: use "auto" (NOT forced "on") so the kernel a6xx recovery path
+# can collapse the CX power domain and reset the GPU after a hang. Forcing
+# power/control=on takes a permanent runtime-PM reference, so a6xx_recover()'s
+# pm_runtime_put_sync() never suspends the GPU -> the CX gdsc can't collapse
+# ("cx gdsc didn't collapse") -> recovery fails and a survivable GPU hang becomes
+# a hard wedge needing a reboot. See docs/notes/gpu-lockup-synthesis.md.
+#
+# The 2s autosuspend delay avoids the rapid idle/resume churn the old forced-on
+# rule guarded against (the GMU wedged on fast suspend/resume) while still
+# allowing the recovery-time collapse (recovery uses pm_runtime_put_sync).
+#
+# NEEDS FIELD VALIDATION on the new image: soak for idle/resume-churn GMU wedges.
+ACTION=="add",  SUBSYSTEM=="platform", KERNEL=="3d00000.gpu", TEST=="power/control", ATTR{power/autosuspend_delay_ms}="2000", ATTR{power/control}="auto"
+ACTION=="bind", SUBSYSTEM=="platform", KERNEL=="3d00000.gpu", TEST=="power/control", ATTR{power/autosuspend_delay_ms}="2000", ATTR{power/control}="auto"
