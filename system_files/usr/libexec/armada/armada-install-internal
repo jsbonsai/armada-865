@@ -184,7 +184,7 @@ detect_existing() {
     while IFS=$'\t' read -r num s e name; do
         case "$name" in
             ARMADA_ESP|ARMADA_ROOT|ARMADA_BOOT|ROCKNIX|STORAGE)
-                die "found existing '$name' (partition #$num) on $DEVICE — an internal install already exists. Remove it first with: armada-installer reset" ;;
+                die "found existing '$name' (partition #$num) on $DEVICE — an internal install already exists. Remove it first with: armada-uninstall-internal --keep-free  (then re-run), or undo entirely with: armada-uninstall-internal" ;;
         esac
     done < <(list_partitions)
 }
@@ -198,6 +198,16 @@ find_userdata() {
     UD_START_MIB=$(( (UD_START + 1048575) / 1048576 ))   # round up
     UD_END_MIB=$(( UD_END / 1048576 ))                    # round down
     UD_ORIG_GIB=$(( (UD_END_MIB - UD_START_MIB) / 1024 ))
+    # Absolute last usable sector of the whole disk (secondary-GPT tail excluded).
+    # require_userdata_last() proves nothing lives past userdata, so the Armada
+    # root may claim the entire tail — including free space left by earlier deleted
+    # partitions (e.g. a previous install removed with `armada-uninstall-internal --keep-free`),
+    # which lies *after* UD_END and would be stranded if we bounded at UD_END_MIB.
+    local last_sec
+    last_sec=$(sgdisk -p "$DEVICE" 2>/dev/null | sed -n 's/.*last usable sector is \([0-9]*\).*/\1/p')
+    [[ $last_sec =~ ^[0-9]+$ ]] || die "could not read disk end (last usable sector) for $DEVICE"
+    DISK_END_MIB=$(( (last_sec + 1) * 512 / 1048576 ))
+    (( DISK_END_MIB > UD_END_MIB )) || DISK_END_MIB=$UD_END_MIB   # never shrink below userdata end
 }
 
 # userdata must be the last partition: we claim the freed tail and numbers
@@ -214,7 +224,9 @@ require_userdata_last() {
 # Resolve the new Android userdata size (MiB) from flags / default, then validate.
 choose_split() {
     local window_mib min_mib max_mib
-    window_mib=$(( UD_END_MIB - UD_START_MIB ))
+    # Whole reclaimable window = from userdata start to the disk end (userdata is
+    # last, verified), not just the original userdata extent.
+    window_mib=$(( DISK_END_MIB - UD_START_MIB ))
     min_mib=$ANDROID_MIN_MIB
     # Leave ESP + a root floor for Armada.
     max_mib=$(( window_mib - ESP_MIB - ROOT_MIN_MIB - 8 ))
@@ -241,7 +253,7 @@ choose_split() {
     ESP_START_MIB=$NEW_UD_END_MIB
     ESP_END_MIB=$(( ESP_START_MIB + ESP_MIB ))
     ROOT_START_MIB=$ESP_END_MIB
-    ROOT_END_MIB=$UD_END_MIB
+    ROOT_END_MIB=$DISK_END_MIB
     ARMADA_ROOT_GIB=$(( (ROOT_END_MIB - ROOT_START_MIB) / 1024 ))
     NEW_UD_GIB=$(( NEW_UD_MIB / 1024 ))
 }
@@ -278,9 +290,10 @@ partition_disk() {
     parted -s "$DEVICE" set "$esp_num" esp on
     sgdisk --typecode="${esp_num}:${ESP_GUID}" "$DEVICE" >/dev/null
 
-    # Bound the btrfs at the old userdata end, never 100%: stays inside the freed
-    # window and never spans a trailing partition.
-    parted -a optimal -s "$DEVICE" mkpart primary btrfs "${ROOT_START_MIB}MiB" "${ROOT_END_MIB}MiB"
+    # Armada root claims the whole tail to the disk end (userdata verified last).
+    # Use parted 100% for the end so alignment + the GPT tail are handled exactly;
+    # ROOT_END_MIB (== DISK_END_MIB) drives only the plan/size display.
+    parted -a optimal -s "$DEVICE" mkpart primary btrfs "${ROOT_START_MIB}MiB" 100%
     parted -s "$DEVICE" name "$root_num" ARMADA_ROOT
 
     partprobe "$DEVICE" || true

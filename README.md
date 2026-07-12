@@ -96,6 +96,65 @@ tracked.
 
 ---
 
+## Advanced: install to internal storage (optional, RP5)
+
+> ⚠️ **Advanced & destructive to Android.** The default Armada experience is the
+> non-invasive SD card above — nothing written to the device. This optional step
+> is the opposite: it repartitions internal storage and **factory-resets
+> Android.** Do it only if you understand that. Proven on the **Retroid Pocket 5**.
+
+Once Armada is running from the SD card, you can install it onto the RP5's
+**internal UFS storage** so it boots without the SD card — noticeably faster game
+loads (measured ~60%; internal UFS crushes the SD card at the random I/O games
+do, which is the main game-load bottleneck). Android is **kept but
+factory-reset**, and its storage is shrunk to make room.
+
+**Still no bootloader flashing.** This writes nothing to `xbl`/`abl`/`boot`/
+`super`/`vbmeta` and needs no EDL cable or PC. The stock RP5 UEFI boots a
+boot-flagged internal ESP directly — proven on hardware (`efibootmgr` →
+`BootCurrent = scsi0`). Because no bootloader bytes are touched, there is no brick
+path: worst case is "put the SD card back and boot from it."
+
+**Requirements:** an RP5 running Armada **from the SD card** (you must be booted
+from SD, not internal), and root access.
+
+```bash
+# Default split: Android keeps ~20 GiB, Armada gets the rest
+sudo /usr/libexec/armada/armada-install-internal
+
+# Or choose the split (pass at most one):
+sudo /usr/libexec/armada/armada-install-internal --android-size 32
+sudo /usr/libexec/armada/armada-install-internal --armada-size 90
+```
+
+It backs up the partition table first, prints the exact plan, asks for
+confirmation (skip with `--yes`), then partitions, stages the ESP, deploys the
+running image with `ostree`, and repoints GRUB at the internal root. When it
+finishes: **power off, remove the SD card, power on, and hold Vol+** through the
+Android splash to reach GRUB and boot Armada from internal. Boot **without** Vol+
+to get Android.
+
+**Reinstall / undo:** to redo the install, remove it first, then re-run the
+installer; to fully back out, remove it and give the space back to Android:
+
+```bash
+# Try again with a different split: remove, leave the space free, reinstall
+sudo /usr/libexec/armada/armada-uninstall-internal --keep-free
+sudo /usr/libexec/armada/armada-install-internal --armada-size 90
+
+# Undo entirely: remove Armada and grow Android back to full size
+sudo /usr/libexec/armada/armada-uninstall-internal
+```
+
+Or simply re-insert the SD and boot it — it is never modified.
+(`armada-uninstall-internal` backs up the GPT first but is newer than the
+installer; treat it as beta.)
+
+Full walkthrough and rollback details:
+[`docs/internal-install.md`](docs/internal-install.md).
+
+---
+
 ## How this fork differs from upstream Armada
 
 ### Boot architecture (the biggest structural change)

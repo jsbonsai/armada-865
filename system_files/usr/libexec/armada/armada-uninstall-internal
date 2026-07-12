@@ -1,0 +1,311 @@
+#!/usr/bin/bash
+# armada-uninstall-internal — remove an internal Armada install from the RP5's
+# UFS storage, undoing armada-install-internal. Run from the SD card, as root.
+#
+# STATUS: DRAFTED, NOT YET HARDWARE-VALIDATED (2026-07-11). Review
+#   docs/notes/internal-install-TODO.md  before relying on it. The GPT is ALWAYS
+# backed up first, so a bad run is recoverable with `sgdisk --load-backup`.
+#
+# What it does — the mirror image of the installer, and just as conservative:
+#   1. Backs up the internal GPT (rollback insurance).
+#   2. Deletes ONLY the partitions the installer added — ARMADA_ROOT and
+#      ARMADA_ESP (also ARMADA_BOOT/ROCKNIX/STORAGE if an older/ROCKNIX layout is
+#      present). super / xbl / abl / boot / vbmeta / persist are never touched.
+#   3. Then, depending on mode:
+#        reclaim (default) — grows Android userdata back over the freed tail and
+#          wipes its filesystem signature, so Android reformats it full-size on
+#          next boot (a clean factory state). This is the "give the space back to
+#          Android / full undo" path.
+#        --keep-free       — leaves the freed space unallocated so you can re-run
+#          armada-install-internal immediately (the "reinstall / try again" path).
+#
+# After a reclaim: boot Android (power on WITHOUT holding Vol+) and let it
+# re-initialise storage. The SD card still boots Armada, unchanged.
+#
+# Like the installer, this touches NO bootloader bytes — there is no brick path,
+# only "undo." Recovery from a mid-run failure is "restore the GPT backup."
+
+set -euo pipefail
+
+# ---- shared helper (same lib the installer uses) ----------------------------
+source /usr/lib/armada/storage-lib      # armada_internal_device
+
+# ---- CLI --------------------------------------------------------------------
+DEVICE="${ARMADA_INTERNAL_DEVICE:-$(armada_internal_device || true)}"
+ASSUME_YES=0
+GPT_BACKUP=""
+MODE=reclaim                # reclaim | keep-free
+
+# ---- run state (for cleanup) ------------------------------------------------
+destructive=0
+INHIBIT_PID=""
+
+usage() {
+    cat >&2 <<EOF
+Usage: armada-uninstall-internal [options]
+
+Removes an internal Armada install (ARMADA_ESP + ARMADA_ROOT) from the RP5's
+internal storage. Run from the SD card, as root. Touches no bootloader.
+
+Mode (choose at most one; default: reclaim):
+  --reclaim             grow Android userdata back over the freed space and let
+                        Android reformat it full-size (full undo)  [default]
+  --keep-free           leave the freed space unallocated, ready for a fresh
+                        armada-install-internal (reinstall / try again)
+
+Other options:
+  --device /dev/sdX     internal disk (default: autodetected = ${DEVICE:-<none>})
+  --gpt-backup PATH     where to write the GPT backup (default: /root/…)
+  -y, --yes             skip the confirmation prompt
+  -h, --help            this help
+EOF
+    exit "${1:-2}"
+}
+
+die()  { echo "ERROR: $*" >&2; exit 1; }
+step() { echo; echo ">>> $*"; }
+
+# ---- lifecycle --------------------------------------------------------------
+cleanup() {
+    local rc=$?
+    [[ -n "$INHIBIT_PID" ]] && kill "$INHIBIT_PID" 2>/dev/null || true
+    if (( rc != 0 && destructive == 1 )); then
+        cat >&2 <<EOF
+
+ERROR: uninstall did not finish after the partition table was modified.
+  The internal layout may be inconsistent. Do NOT trust internal boot.
+  Recover by restoring the GPT backup from the SD system:
+    sgdisk --load-backup=${GPT_BACKUP:-<backup>} ${DEVICE}
+  The SD card is untouched and still boots Armada.
+EOF
+    fi
+    exit $rc
+}
+trap cleanup EXIT
+
+inhibit_sleep() {
+    command -v systemd-inhibit >/dev/null 2>&1 || return 0
+    systemd-inhibit --what=sleep:idle --who="Armada Internal Uninstaller" \
+        --why="rewriting internal storage" --mode=block sleep infinity &
+    INHIBIT_PID=$!
+}
+
+need_root() { [[ $EUID -eq 0 ]] || die "must run as root"; }
+
+need_cmds() {
+    local cmd missing=0
+    for cmd in awk findmnt jq parted partprobe sfdisk sgdisk udevadm wipefs; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: missing required command: $cmd" >&2; missing=1; }
+    done
+    (( missing == 0 )) || exit 1
+}
+
+check_device() {
+    [[ -n $DEVICE ]] || die "could not determine internal storage; pass --device /dev/sdX"
+    [[ -b $DEVICE ]] || die "internal storage device $DEVICE not found"
+}
+
+# Refuse to modify the disk we booted from (must be booted from the SD).
+refuse_self() {
+    local src
+    src=$(findmnt -no SOURCE /sysroot 2>/dev/null || findmnt -no SOURCE /)
+    src=${src%%\[*}
+    src=$(readlink -f "$src" 2>/dev/null || echo "$src")
+    [[ -n $src ]] || die "cannot determine the boot device; refusing to modify $DEVICE"
+    case "$src" in
+        "$DEVICE"*) die "booted from $DEVICE; run this from the SD card, not internal storage" ;;
+    esac
+    echo "Booted from: $src (not $DEVICE) — OK"
+}
+
+confirm() {
+    (( ASSUME_YES )) && return 0
+    local answer
+    read -rp "$1 [y/N]: " answer
+    [[ $answer =~ ^[Yy]$ ]]
+}
+
+# ---- partition table introspection (identical to the installer) -------------
+part_node() {
+    local dev="$1" num="$2"
+    [[ $dev =~ [0-9]$ ]] && echo "${dev}p${num}" || echo "${dev}${num}"
+}
+
+# One TSV row per partition: NUM  START_BYTE  END_BYTE(inclusive)  NAME.
+list_partitions() {
+    sfdisk --json "$DEVICE" 2>/dev/null | jq -r '
+        .partitiontable as $t
+        | ($t.sectorsize // 512) as $ss
+        | ($t.partitions // [])[]
+        | [ (.node | match("[0-9]+$").string),
+            (.start * $ss),
+            ((.start + .size) * $ss - 1),
+            (.name // "") ]
+        | @tsv'
+}
+
+is_target() {
+    local n="$1" t
+    for t in "${TARGET_NUMS[@]}"; do [[ $t == "$n" ]] && return 0; done
+    return 1
+}
+
+# ---- discovery --------------------------------------------------------------
+find_targets() {
+    local ud_line num s e name
+    mapfile -t ud_line < <(list_partitions | awk -F'\t' '$4=="userdata"')
+    (( ${#ud_line[@]} == 1 )) || { parted -s "$DEVICE" print >&2; die "could not uniquely find the userdata partition on $DEVICE"; }
+    IFS=$'\t' read -r UD_NUM UD_START UD_END _ <<< "${ud_line[0]}"
+    UD_START_MIB=$(( (UD_START + 1048575) / 1048576 ))   # round up
+
+    TARGET_NUMS=()
+    TARGET_DESC=()
+    while IFS=$'\t' read -r num s e name; do
+        case "$name" in
+            ARMADA_ESP|ARMADA_ROOT|ARMADA_BOOT|ROCKNIX|STORAGE)
+                TARGET_NUMS+=("$num"); TARGET_DESC+=("#$num $name") ;;
+        esac
+    done < <(list_partitions)
+    (( ${#TARGET_NUMS[@]} > 0 )) \
+        || die "no internal Armada install found on $DEVICE (no ARMADA_ESP/ARMADA_ROOT/…); nothing to remove"
+}
+
+# The Armada partitions must be the trailing partitions: nothing that isn't a
+# target and isn't userdata may lie after userdata. Guarantees the freed space is
+# a contiguous tail we can either leave free or fold back into userdata.
+require_targets_trailing() {
+    local num s e name
+    while IFS=$'\t' read -r num s e name; do
+        (( num == UD_NUM )) && continue
+        is_target "$num" && continue
+        (( e > UD_END )) && { parted -s "$DEVICE" print >&2; die "partition #$num ($name) lies after userdata on $DEVICE; refusing (unexpected layout)"; }
+    done < <(list_partitions)
+}
+
+# Absolute last usable sector of the disk (for the reclaim grow display).
+disk_end_mib() {
+    local last_sec
+    last_sec=$(sgdisk -p "$DEVICE" 2>/dev/null | sed -n 's/.*last usable sector is \([0-9]*\).*/\1/p')
+    [[ $last_sec =~ ^[0-9]+$ ]] || die "could not read disk end for $DEVICE"
+    echo $(( (last_sec + 1) * 512 / 1048576 ))
+}
+
+# ---- GPT backup (mandatory) -------------------------------------------------
+backup_gpt() {
+    [[ -n $GPT_BACKUP ]] || GPT_BACKUP="/root/armada-gpt-backup-uninstall-$(date +%Y%m%d-%H%M%S).bin"
+    mkdir -p "$(dirname "$GPT_BACKUP")"
+    sgdisk --backup="$GPT_BACKUP" "$DEVICE" >/dev/null || die "GPT backup failed; refusing to continue"
+    [[ -s $GPT_BACKUP ]] || die "GPT backup is empty; refusing to continue"
+    echo "GPT backed up to: $GPT_BACKUP"
+    echo "  (restore with:  sgdisk --load-backup=$GPT_BACKUP $DEVICE )"
+}
+
+# ---- the work ---------------------------------------------------------------
+print_plan() {
+    local DISK_END_MIB; DISK_END_MIB=$(disk_end_mib)
+    cat <<EOF
+
+Uninstall plan for $DEVICE
+--------------------------------------------------------------
+  Remove partitions : ${TARGET_DESC[*]}
+  Mode              : $MODE
+EOF
+    if [[ $MODE == reclaim ]]; then
+        cat <<EOF
+  Android userdata  : grow #$UD_NUM to ${UD_START_MIB} .. ${DISK_END_MIB} MiB
+                      (~$(( (DISK_END_MIB - UD_START_MIB) / 1024 )) GiB) and wipe its
+                      filesystem so Android reformats it full-size on next boot
+EOF
+    else
+        cat <<EOF
+  Freed space       : left UNALLOCATED (re-run armada-install-internal to reuse)
+  Android userdata  : unchanged (stays its current size)
+EOF
+    fi
+    cat <<EOF
+--------------------------------------------------------------
+  NOT touched: super / xbl / abl / boot / vbmeta / persist / the SD card.
+  The GPT is backed up first; a failure is recoverable via --load-backup.
+
+EOF
+}
+
+remove_targets() {
+    step "Removing Armada partitions: ${TARGET_DESC[*]}"
+    # Unmount anything mounted from a target, then delete high-to-low so numbers
+    # below don't shift under us.
+    local n node sorted
+    sorted=$(printf '%s\n' "${TARGET_NUMS[@]}" | sort -rn)
+    destructive=1
+    for n in $sorted; do
+        node=$(part_node "$DEVICE" "$n")
+        findmnt -n "$node" >/dev/null 2>&1 && umount -R "$node" 2>/dev/null || true
+        parted -s "$DEVICE" rm "$n"
+    done
+    partprobe "$DEVICE" || true
+    udevadm settle
+}
+
+reclaim_userdata() {
+    step "Reclaiming freed space into Android userdata (#$UD_NUM)"
+    local node
+    node=$(part_node "$DEVICE" "$UD_NUM")
+    findmnt -n "$node" >/dev/null 2>&1 && umount -R "$node" 2>/dev/null || true
+    # Recreate userdata spanning to the disk end. rm+mkpart re-adds at the lowest
+    # free number, which is UD_NUM now that the higher-numbered targets are gone.
+    parted -s "$DEVICE" rm "$UD_NUM"
+    parted -a optimal -s "$DEVICE" mkpart primary ext4 "${UD_START_MIB}MiB" 100%
+    parted -s "$DEVICE" name "$UD_NUM" userdata
+    partprobe "$DEVICE" || true
+    udevadm settle
+    # Wipe the fs signature so Android treats it as blank and formats it fresh at
+    # the full new size (matches the factory-reset state the installer left).
+    node=$(part_node "$DEVICE" "$UD_NUM")
+    wipefs -a "$node" >/dev/null 2>&1 || true
+    echo "userdata #$UD_NUM regrown and wiped — Android will reformat it on next boot."
+}
+
+# ---- args -------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reclaim)     MODE=reclaim ;;
+        --keep-free)   MODE=keep-free ;;
+        --device)      DEVICE="${2:?}"; shift ;;
+        --gpt-backup)  GPT_BACKUP="${2:?}"; shift ;;
+        -y|--yes)      ASSUME_YES=1 ;;
+        -h|--help)     usage 0 ;;
+        *)             echo "unknown option: $1" >&2; usage 2 ;;
+    esac
+    shift
+done
+
+# ---- main -------------------------------------------------------------------
+need_root
+need_cmds
+check_device
+refuse_self
+find_targets
+require_targets_trailing
+print_plan
+
+if ! confirm "Remove the internal Armada install from $DEVICE?"; then
+    echo "Aborted; nothing changed."
+    exit 0
+fi
+
+inhibit_sleep
+backup_gpt
+remove_targets
+[[ $MODE == reclaim ]] && reclaim_userdata
+
+step "Done."
+parted -s "$DEVICE" print 2>/dev/null || true
+cat <<EOF
+
+Internal Armada install removed.
+  * Boot Android: power on WITHOUT holding Vol+ (it re-initialises storage).
+  * The SD card is untouched and still boots Armada.
+EOF
+if [[ $MODE == keep-free ]]; then
+    echo "  * To reinstall: sudo /usr/libexec/armada/armada-install-internal"
+fi
