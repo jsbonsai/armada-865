@@ -1,6 +1,9 @@
 [Unit]
 Description=SM8250 audio watchdog (recover auto_null, refresh mixers)
 ConditionPathExists=/proc/asound/cards
+# Skip while the fake-suspend freezer is active: the 30s watchdog otherwise opens
+# ~98 runuser PAM sessions/hour against frozen PipeWire (PAM/audit/journal churn).
+ConditionPathExists=!/run/armada/fake-suspend.active
 After=sound.target
 
 [Service]
