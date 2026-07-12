@@ -1,0 +1,10 @@
+{
+  "axis_leftx_min": -1000,
+  "axis_leftx_max": 1150,
+  "axis_lefty_min": -990,
+  "axis_lefty_max": 1180,
+  "axis_rightx_min": -1000,
+  "axis_rightx_max": 1150,
+  "axis_righty_min": -990,
+  "axis_righty_max": 1180
+}

@@ -4,7 +4,13 @@ from pathlib import Path
 
 
 CONFIG = Path("/etc/armada/input-calibration.json")
-PARAMETERS = Path("/sys/module/rsinput/parameters")
+# The SM8250 Retroid gamepad is driven by the "retroid" module (this fork);
+# upstream Armada devices use "rsinput". Both expose the same axis_* params, so
+# apply to whichever module is actually present.
+PARAM_CANDIDATES = (
+    Path("/sys/module/retroid/parameters"),
+    Path("/sys/module/rsinput/parameters"),
+)
 PARAM_NAMES = (
     "axis_leftx_min",
     "axis_leftx_center",
@@ -36,7 +42,10 @@ PARAM_NAMES = (
 
 
 def main():
-    if not CONFIG.exists() or not PARAMETERS.exists():
+    if not CONFIG.exists():
+        return
+    parameters = next((p for p in PARAM_CANDIDATES if p.exists()), None)
+    if parameters is None:
         return
     with CONFIG.open(encoding="utf-8") as f:
         params = json.load(f)
@@ -44,8 +53,8 @@ def main():
         raise SystemExit("input calibration config must be a JSON object")
     for name in PARAM_NAMES:
         if name in params:
-            (PARAMETERS / name).write_text(str(int(params[name])), encoding="utf-8")
-    (PARAMETERS / "update_params").write_text("1", encoding="utf-8")
+            (parameters / name).write_text(str(int(params[name])), encoding="utf-8")
+    (parameters / "update_params").write_text("1", encoding="utf-8")
 
 
 if __name__ == "__main__":
