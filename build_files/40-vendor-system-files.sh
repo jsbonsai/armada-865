@@ -10,6 +10,8 @@ chmod 0755 /usr/libexec/armada/mkbootimg.py /usr/libexec/armada/gki/generate_gki
 
 chmod 0755 /usr/libexec/armada/*
 chmod 0755 /usr/libexec/os-session-select
+# system-sleep hooks (real s2idle path) are silently ignored unless executable.
+chmod 0755 /usr/lib/systemd/system-sleep/* 2>/dev/null || true
 # /etc/armada carries executable bring-up scripts (systemd ExecStart targets);
 # a lost exec bit fails those units with EXEC spawning/Permission denied.
 find /etc/armada -type f ! -name '*.conf' -exec chmod 0755 {} + 2>/dev/null || true
@@ -57,6 +59,7 @@ systemctl mask bootloader-update.service
 # irqbalance re-spreads IRQs across all cores, overriding Armada's IRQ affinity policy.
 systemctl mask irqbalance.service
 
-# systemd-suspend.service is overridden (drop-in) to run fake-suspend; mask the
-# other sleep ops so nothing reaches real suspend (it hangs this SoC).
+# systemd-suspend.service's drop-in routes to suspend-select, which does real
+# s2idle when /etc/armada/suspendmode.real exists (Stage-0 opt-in, ships absent)
+# else fake-suspend. Keep hibernate/hybrid masked (no swap; those do hang).
 systemctl mask systemd-hibernate.service systemd-hybrid-sleep.service systemd-suspend-then-hibernate.service

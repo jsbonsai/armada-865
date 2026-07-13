@@ -1,0 +1,112 @@
+#!/bin/bash
+# SM8250 real-s2idle ADSP/LPASS release hook.
+#
+# WHY: armada-sm8250-audio-silence.service holds a permanent `paplay /dev/zero`
+# on the speaker sink, keeping the q6asm PCM RUNNING 24/7. The ADSP is an
+# autonomous RPMh master: while any PCM session is RUNNING it never collapses
+# its LPASS island, so it keeps voting CX/LCX/LMX corners and the aggregate
+# RPMh sleep-set (aosd/cxsd/ddr) is never committed. Proven on-device: stopping
+# the stream unsticks the qcom_stats `adsp` counter 0->2 (cycle 6).
+#
+# This hook closes the PCM before s2idle and restores it after, pairing the
+# teardown with a resume-side PipeWire quantum nudge so the PCM stop->start
+# audio-death race (AFE/SoundWire port arms unclocked, hw_ptr freezes) does not
+# return. Rate is already pinned (50-armada-sm8250-clock.conf: 48000/512), so a
+# clean close+reopen + quantum re-negotiation re-clocks the port instead of
+# re-rolling a wedged one.
+#
+# system-sleep hooks run as root in system context on the REAL suspend path
+# (systemd-sleep pre/post). They do NOT run under the legacy fake-suspend
+# drop-in (which bypasses systemd-sleep); this hook is part of retiring it.
+#
+# Never abort suspend: always exit 0 (a nonzero `pre` hook cancels the sleep).
+set -uo pipefail
+
+ACTION="${1:-}"
+MODE="${2:-}"
+LOG_TAG="armada-adsp-sleep"
+SINK="alsa_sink.sm8250_speaker"
+USER_NAME="${ARMADA_SESSION_USER:-armada}"
+
+log() { logger -t "$LOG_TAG" -- "$*"; }
+
+# Only act on real system suspend / s2idle. Ignore hibernate variants (masked).
+case "$MODE" in
+    suspend|mem|freeze|s2idle) ;;
+    *) exit 0 ;;
+esac
+
+uid="$(id -u "$USER_NAME" 2>/dev/null || echo 1000)"
+runtime="/run/user/${uid}"
+[[ -d "$runtime" ]] || { log "no session runtime ${runtime}; skipping"; exit 0; }
+
+as_user() {
+    # 8s cap so a wedged PipeWire never stalls the sleep lifecycle.
+    timeout 8 runuser -u "$USER_NAME" -- \
+        env XDG_RUNTIME_DIR="$runtime" "$@"
+}
+
+# force-quantum override handle (0 = release back to config min-quantum).
+force_quantum() { as_user pw-metadata -n settings 0 clock.force-quantum "$1" >/dev/null 2>&1 || true; }
+
+pcm_all_closed() {
+    local s ok=0
+    for s in /proc/asound/card*/pcm*p/sub*/status; do
+        [[ -r "$s" ]] || continue
+        ok=1
+        grep -q '^closed' "$s" || return 1
+    done
+    return $(( ok == 1 ? 0 : 1 ))
+}
+
+do_pre() {
+    log "pre: releasing ADSP hold before s2idle"
+
+    # Stop the units that keep (or would re-open) the PCM. The keepalive timer
+    # is normally gated on the fake-suspend flag, which is NOT set on the real
+    # path, so stop it explicitly for the tiny pre-freeze window.
+    systemctl stop armada-sm8250-audio-keepalive.timer >/dev/null 2>&1 || true
+    as_user systemctl --user stop armada-sm8250-audio-silence.service >/dev/null 2>&1 || true
+    as_user systemctl --user stop armada-sm8250-audio-monitor.service >/dev/null 2>&1 || true
+
+    # Force the ALSA device closed so the q6asm session ends and the ADSP can
+    # collapse its LPASS island (PipeWire would otherwise idle-hold the sink).
+    as_user pactl suspend-sink "$SINK" 1 >/dev/null 2>&1 || true
+
+    # Give the AFE/SoundWire port up to ~1.5s to fully tear down.
+    for _ in 1 2 3 4 5 6; do
+        pcm_all_closed && break
+        sleep 0.25
+    done
+    if pcm_all_closed; then
+        log "pre: all PCMs closed; ADSP free to sleep"
+    else
+        log "pre: WARNING PCM not fully closed (see /proc/asound/card*/pcm*p/sub*/status)"
+    fi
+}
+
+do_post() {
+    log "post: restoring audio after s2idle"
+
+    # Re-open the sink first, then re-negotiate the graph quantum to re-clock the
+    # AFE port cleanly (ROCKNIX's cure for the first-sound-silent/dropout glitch).
+    as_user pactl suspend-sink "$SINK" 0 >/dev/null 2>&1 || true
+    force_quantum 1023
+    force_quantum 1024
+    force_quantum 0   # release back to 50-armada-sm8250-clock.conf min-quantum
+
+    # Restart the keepalive watchdog and the silence stream. A fresh open is a
+    # clean start (not a stop->start on a live session), and the watchdog verifies
+    # hw_ptr advances / re-rolls if the port armed unclocked.
+    systemctl start armada-sm8250-audio-keepalive.timer >/dev/null 2>&1 || true
+    as_user systemctl --user start armada-sm8250-audio-monitor.service >/dev/null 2>&1 || true
+    as_user systemctl --user start armada-sm8250-audio-silence.service >/dev/null 2>&1 || true
+    log "post: audio restored (quantum re-nudged, silence stream back)"
+}
+
+case "$ACTION" in
+    pre)  do_pre  ;;
+    post) do_post ;;
+    *)    ;;
+esac
+exit 0

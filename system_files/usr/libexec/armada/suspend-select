@@ -1,0 +1,26 @@
+#!/bin/bash
+# Stage-0 s2idle selector (Armada-865 SM8250).
+#
+# systemd-suspend.service's ExecStart points here (via the 10-armada-*.conf
+# drop-in). It chooses between REAL s2idle and the legacy fake-suspend:
+#
+#   /etc/armada/suspendmode.real present  -> real systemd-sleep (s2idle freeze),
+#                                            which runs the system-sleep hooks
+#                                            (ADSP teardown etc.) and echoes
+#                                            `freeze` to /sys/power/state.
+#   flag absent (DEFAULT)                 -> fake-suspend (unchanged behaviour).
+#
+# Toggle at runtime, no rebuild:  sudo touch|rm /etc/armada/suspendmode.real
+# Ships ABSENT so a fresh boot behaves exactly like today (fake-suspend); real
+# s2idle is opt-in per-test until it's validated on-device.
+set -uo pipefail
+
+SLEEP_BIN=/usr/lib/systemd/systemd-sleep
+
+if [ -e /etc/armada/suspendmode.real ] && [ -x "$SLEEP_BIN" ]; then
+    logger -t armada-suspend-select -- "real s2idle path (systemd-sleep suspend)"
+    exec "$SLEEP_BIN" suspend
+fi
+
+logger -t armada-suspend-select -- "fake-suspend path"
+exec /usr/libexec/armada/fake-suspend sleep
