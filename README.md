@@ -70,9 +70,15 @@ AYN/AYANEO install flow — **Retroid SM8250 devices don't need it**; ignore it.
 Controls (presents as a SteamOS handheld), display + brightness, speakers
 (self-healing — see the audio section), Wi-Fi, battery status,
 Eco/Balanced/Performance power profiles (QAM → Armada Control), Decky, games via
-Proton/FEX — tested: Hades, Castle Crashers, DMC4, L4D2, MK9. Rumble works on
-Flip 2. Ballpark: Hades ~55–60 fps @ 720p on Performance; 2000s/2010s titles are
-the sweet spot (figure ~40–50% of an SM8550 device's CPU).
+Proton/FEX — tested: Hades, Castle Crashers, DMC4, DMC5, L4D2, MK9, Boltgun.
+Rumble works on Flip 2. Ballpark: Hades ~55–60 fps @ 720p on Performance;
+2000s/2010s titles are the sweet spot (figure ~40–50% of an SM8550 device's CPU).
+
+**Automatic performance & compatibility (built in, no config):** DXVK/wine helper
+threads are pinned to the fast CPU cluster at launch (measured ~+16% FPS on DMC4);
+games with startup movies/cutscenes (e.g. Boltgun) now launch instead of hanging on
+a black screen; and if a game hard-locks the GPU, the driver recovers to Steam
+instead of requiring a reboot.
 
 **Quick-access menu:** on the RP5, press **Back** or **double-tap Home**; on
 the Flip 2 (which has no Back button), **double-tap Home**. The brief Steam-menu

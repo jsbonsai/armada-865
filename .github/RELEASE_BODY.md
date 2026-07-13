@@ -1,4 +1,4 @@
-# Armada-865 v0.2.0-beta
+# Armada-865 v0.2.1-beta
 
 A SteamOS-like experience on Snapdragon 865 (SM8250) Retroid handhelds. See the
 [README](../../tree/sm8250#readme) for the full story, what works, and how this
@@ -7,6 +7,9 @@ fork differs from upstream Armada.
 **Supported devices:** Retroid Pocket 5 · Retroid Pocket Flip 2 · Retroid Pocket Mini V2
 
 > ⚠️ **Early community beta.** Expect bugs — and please report them.
+>
+> **Fixed in v0.2.1:** analog-stick calibration now applies automatically at boot
+> (v0.2.0 required a manual re-apply after each boot).
 
 ---
 
