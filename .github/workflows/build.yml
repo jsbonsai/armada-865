@@ -9,7 +9,12 @@ on:
       - main
       - sm8250
     paths-ignore:
-      - '**/README.md'
+      # Docs, release notes, and workflow edits don't change the image — skip the
+      # ~20min container build for them (also avoids a signing-gate red-X on
+      # non-default-branch doc pushes). Trigger builds manually via workflow_dispatch.
+      - '**.md'
+      - 'docs/**'
+      - '.github/**'
   workflow_dispatch:
 
 env:
