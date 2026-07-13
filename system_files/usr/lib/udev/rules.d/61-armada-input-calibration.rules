@@ -1,0 +1,7 @@
+# The Retroid SM8250 gamepad ("retroid" driver) is a late-probing UART serdev that
+# binds ~16s into boot — well after armada-input-calibration.service's
+# systemd-modules-load ordering, so that service no-ops for it and the stick range
+# stays at the driver default. Re-run the calibration when the gamepad input device
+# actually appears; apply-input-calibration is idempotent and waits for the driver
+# to apply the range before returning (so InputPlumber reads the calibrated range).
+ACTION=="add", SUBSYSTEM=="input", KERNEL=="input[0-9]*", ATTR{name}=="Retroid Pocket Gamepad", RUN+="/usr/libexec/armada/apply-input-calibration"

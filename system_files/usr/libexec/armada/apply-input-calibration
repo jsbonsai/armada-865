@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 import json
+import time
 from pathlib import Path
 
 
@@ -54,7 +55,21 @@ def main():
     for name in PARAM_NAMES:
         if name in params:
             (parameters / name).write_text(str(int(params[name])), encoding="utf-8")
-    (parameters / "update_params").write_text("1", encoding="utf-8")
+    up = parameters / "update_params"
+    up.write_text("1", encoding="utf-8")
+    # The driver re-applies the declared abs ranges on its next MCU report; wait
+    # for it to consume the flag (up to ~1.5s) so the range is live before
+    # InputPlumber grabs the pad. (When run too early — e.g. the old
+    # systemd-modules-load ordering, before this late-probing UART pad binds — the
+    # module dir doesn't exist yet and we already returned above; a udev rule now
+    # also runs us on the gamepad 'add' event, which is when this actually works.)
+    for _ in range(150):
+        try:
+            if up.read_text().strip() == "0":
+                break
+        except OSError:
+            break
+        time.sleep(0.01)
 
 
 if __name__ == "__main__":
