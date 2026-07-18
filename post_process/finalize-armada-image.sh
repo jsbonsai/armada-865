@@ -4,7 +4,7 @@
 set -euxo pipefail
 
 RAW_IMAGE="${1:-output/raw/disk.raw}"
-ROCKNIX_ABL_VERSION="${ROCKNIX_ABL_VERSION:-v1.1.3}"
+ROCKNIX_ABL_VERSION="${ROCKNIX_ABL_VERSION:-v1.1.5}"
 OUT="${OUT:-output/armada-$(TZ='America/New_York' date +%Y%m%d).img.gz}"
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
