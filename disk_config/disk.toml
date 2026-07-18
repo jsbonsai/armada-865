@@ -1,4 +1,9 @@
-[[customizations.filesystem]]
-mountpoint = "/"
-# Enough room for one staged bootc upgrade before first-boot repart growth.
-minsize = "10 GiB"
+# Intentionally minimal (empty blueprint).
+#
+# BIB's 2026-06 update stopped accepting [[customizations.filesystem]] for the
+# "raw" image type ("customizations.filesystem: not supported"), which broke the
+# SM8250 GRUB disk build. The former hint here was a 10 GiB root minsize to leave
+# room for one staged bootc upgrade before first-boot repart growth. That's a
+# nicety, not a requirement: the flashed SD/eMMC root grows to fill the card on
+# first boot, and internal installs repartition from scratch. Dropping it unblocks
+# the build with no functional loss for the normal flash -> boot -> use flow.
