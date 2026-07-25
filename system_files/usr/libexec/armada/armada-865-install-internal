@@ -33,7 +33,7 @@ set -euo pipefail
 source /usr/lib/armada/bootimg-args     # armada_default_bls_entry
 source /usr/lib/armada/storage-lib      # armada_internal_device
 
-ARMADA_REGISTRY="ghcr.io/virtudude/armada"
+ARMADA_REGISTRY="ghcr.io/jsbonsai/armada-865"
 ESP_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 # ESP is 2 GiB FAT32 (ROCKNIX geometry — the size/format proven to boot on the

@@ -188,3 +188,6 @@ jobs:
           TAGS: ${{ steps.push.outputs.digest }}
           COSIGN_EXPERIMENTAL: false
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+          # Key is encrypted with an empty passphrase; without this cosign
+          # prompts on a TTY-less runner and the step hangs/fails.
+          COSIGN_PASSWORD: ""

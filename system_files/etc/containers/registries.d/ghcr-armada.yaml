@@ -1,3 +1,3 @@
 docker:
-  ghcr.io/virtudude/armada:
+  ghcr.io/jsbonsai/armada-865:
     use-sigstore-attachments: true
