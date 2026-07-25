@@ -97,7 +97,9 @@ rm "${WORK}/loop"
 
 GZIP_LEVEL="${GZIP_LEVEL:-6}"
 mkdir -p "$(dirname "${OUT}")"
-pigz -f "-${GZIP_LEVEL}" -p "$(nproc)" -c "${RAW_IMAGE}" > "${OUT}"
+# -n: don't store the source filename in the gzip header — otherwise 7-Zip /
+# Archive Utility extract the image as "disk.raw" instead of the .gz's own name.
+pigz -f -n "-${GZIP_LEVEL}" -p "$(nproc)" -c "${RAW_IMAGE}" > "${OUT}"
 rm -f "${RAW_IMAGE}"
 
 echo "Built: ${OUT}"
