@@ -1,0 +1,102 @@
+#!/bin/bash
+# Flash Retroid's fixed U-Boot (github.com/RetroidPocket/u-boot rp-v1.0.1) to
+# the UFS `loader` partition, from inside a booted Armada — no PC/fastboot needed.
+#
+# Why: Retroid's Android OTA shipped a faulty loader build for the Mini V2 whose
+# simple-framebuffer geometry doesn't match the 1080x1240 panel, so the U-Boot
+# boot menu AND GRUB (which inherits U-Boot's EFI GOP) render garbled. rp-v1.0.1
+# carries the corrected per-device device trees. The stock ABL (and its fastboot
+# mode, Vol- + Power) is untouched, so a bad flash is always recoverable with:
+#   fastboot flash loader <backup-or-release-image>
+set -euo pipefail
+
+RELEASE_URL="https://github.com/RetroidPocket/u-boot/releases/download/rp-v1.0.1"
+IMG_DIR_DEFAULT="/boot/efi/retroid_loader"
+BACKUP_DIR="/var/lib/armada"
+IMG_SIZE=647168
+
+usage() {
+    cat <<EOF
+Usage: armada-flash-loader [--yes] [--device rp5|flip2|rpmini|rpminiv2] [--from DIR]
+Flashes the matching rp-v1.0.1 U-Boot image to the 'loader' partition.
+Images are read from ${IMG_DIR_DEFAULT} (staged on the SD's boot partition),
+or downloaded from ${RELEASE_URL} if missing. sha256-verified either way.
+EOF
+    exit "${1:-0}"
+}
+
+# Pinned sha256 of the rp-v1.0.1 assets (verified 2026-07-25).
+img_sha() {
+    case "$1" in
+        rp5)      echo af2c337f7f9576833581c99a797a05c5a9f3d5afb5f5ef8f8e8404e27ff0b088 ;;
+        flip2)    echo 5055dd574733da49606a27d5a1a4831326ea078a13ed9e5b677146ecc1a3871d ;;
+        rpmini)   echo ee837fa8b9c9e2093414cd87d08f79e3fea60340009409403eee6e4404cda229 ;;
+        rpminiv2) echo 7f110ac7c8e6a98b7507418f3ffd7865ac6395dfc94589492c1d99e114b6b8f8 ;;
+        *) return 1 ;;
+    esac
+}
+
+YES=0 DEVICE="" IMG_DIR="${IMG_DIR_DEFAULT}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --yes) YES=1 ;;
+        --device) DEVICE="${2:?}"; shift ;;
+        --from) IMG_DIR="${2:?}"; shift ;;
+        -h|--help) usage ;;
+        *) echo "unknown argument: $1" >&2; usage 1 ;;
+    esac
+    shift
+done
+
+[ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
+
+if [ -z "${DEVICE}" ]; then
+    model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || true)
+    case "${model}" in
+        *"Mini V2"*)  DEVICE=rpminiv2 ;;
+        *Mini*)       DEVICE=rpmini ;;
+        *Flip*)       DEVICE=flip2 ;;
+        *"Pocket 5"*) DEVICE=rp5 ;;
+        *) echo "unrecognized device model '${model}' — pass --device explicitly" >&2; exit 1 ;;
+    esac
+fi
+SHA=$(img_sha "${DEVICE}") || { echo "unknown device '${DEVICE}'" >&2; exit 1; }
+IMG_NAME="u-boot-sm8250-retroidpocket-${DEVICE}.img"
+
+PART=/dev/disk/by-partlabel/loader
+[ -b "${PART}" ] || { echo "no 'loader' partition found (${PART}) — is this a Retroid SM8250 device?" >&2; exit 1; }
+PART_DEV=$(readlink -f "${PART}")
+PART_SIZE=$(blockdev --getsize64 "${PART_DEV}")
+[ "${PART_SIZE}" -ge "${IMG_SIZE}" ] || { echo "loader partition (${PART_SIZE}B) smaller than image (${IMG_SIZE}B)?!" >&2; exit 1; }
+
+WORK=$(mktemp -d)
+trap 'rm -rf "${WORK}"' EXIT
+IMG="${IMG_DIR}/${IMG_NAME}"
+if [ ! -f "${IMG}" ]; then
+    echo "${IMG_NAME} not in ${IMG_DIR}; downloading from ${RELEASE_URL} ..."
+    curl -fsSL -o "${WORK}/${IMG_NAME}" "${RELEASE_URL}/${IMG_NAME}"
+    IMG="${WORK}/${IMG_NAME}"
+fi
+echo "${SHA}  ${IMG}" | sha256sum -c - >/dev/null || { echo "sha256 mismatch on ${IMG} — refusing to flash" >&2; exit 1; }
+
+BACKUP="${BACKUP_DIR}/loader-backup-$(date +%Y%m%d-%H%M%S).img"
+mkdir -p "${BACKUP_DIR}"
+dd if="${PART_DEV}" of="${BACKUP}" bs=4M status=none
+sync
+echo "current loader backed up to ${BACKUP} (${PART_SIZE} bytes)"
+
+echo "About to flash ${IMG_NAME} (rp-v1.0.1) to ${PART_DEV} (${DEVICE})."
+if [ "${YES}" != 1 ]; then
+    read -r -p "Proceed? [y/N] " a
+    case "${a}" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1 ;; esac
+fi
+
+dd if="${IMG}" of="${PART_DEV}" bs=4M conv=fsync status=none
+# Read back exactly the image span and verify.
+READBACK_SHA=$(dd if="${PART_DEV}" bs="${IMG_SIZE}" count=1 status=none | sha256sum | cut -d' ' -f1)
+[ "${READBACK_SHA}" = "${SHA}" ] || {
+    echo "VERIFY FAILED after write — restore with: dd if=${BACKUP} of=${PART_DEV} bs=4M conv=fsync" >&2
+    echo "or from fastboot (Vol- + Power): fastboot flash loader ${BACKUP}" >&2
+    exit 1
+}
+echo "OK: loader flashed and verified. Boot menu + GRUB should render correctly on next boot."

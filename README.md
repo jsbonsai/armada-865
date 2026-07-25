@@ -45,16 +45,18 @@ release notes.)
 **2. Boot Armada.**
 
 - Insert the SD card and reboot **holding Volume Up** → the stock boot menu
-  appears → boot from SD → **GRUB menu**.
-- Select **your device**: *Retroid Pocket 5*, *Retroid Pocket Flip 2*, or
-  *Retroid Pocket Mini V2* (the wrong entry means a black screen — just reboot
-  and pick again).
+  appears → boot from SD → Armada boots straight through (each device
+  auto-selects its own boot entry; hold any key during the 1-second window if
+  you ever need the GRUB menu).
 - First boot takes a few minutes (filesystem expansion, Steam setup).
 
 > **Mini V2 notes:**
-> - The U-Boot and GRUB *boot menus* render garbled (the bootloader runs before
->   Linux knows the panel) — cosmetic and still navigable. The Mini V2 entry is
->   the **third** option in the GRUB list. SteamOS itself displays correctly.
+> - If the pre-Linux boot screens (U-Boot menu / GRUB) render **garbled**, your
+>   device has the faulty bootloader from a Retroid Android OTA. Once booted
+>   into Armada, run `sudo armada-flash-loader` — it flashes
+>   [Retroid's official fixed U-Boot](https://github.com/RetroidPocket/u-boot/releases/tag/rp-v1.0.1)
+>   (backing up the old one first), and every boot screen renders correctly
+>   from the next boot. Armada boots fine either way; this is cosmetic.
 > - **First-time scaling:** the Mini's near-square screen makes the Steam UI
 >   oversized/cut-off by default. Fix it once: **Settings → Display →** turn off
 >   *Automatically Scale Interface* and lower the scale slider to ~50%.

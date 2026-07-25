@@ -52,6 +52,32 @@ for soc in SM8250 SM8550 SM8650 SM8750; do
     sudo chmod 0755 "$d"/*.sh
 done
 
+# Retroid rp-v1.0.1 U-Boot loader images. Retroid's Android OTA shipped a bad
+# loader for the Mini V2 (simple-framebuffer geometry mismatch) that garbles the
+# U-Boot menu AND GRUB; these are the fixed per-device builds. Staged on the SD
+# so `sudo armada-flash-loader` works offline from the booted system.
+RETROID_UBOOT_URL="https://github.com/RetroidPocket/u-boot/releases/download/rp-v1.0.1"
+declare -A RETROID_UBOOT_SHA=(
+    [rp5]=af2c337f7f9576833581c99a797a05c5a9f3d5afb5f5ef8f8e8404e27ff0b088
+    [flip2]=5055dd574733da49606a27d5a1a4831326ea078a13ed9e5b677146ecc1a3871d
+    [rpmini]=ee837fa8b9c9e2093414cd87d08f79e3fea60340009409403eee6e4404cda229
+    [rpminiv2]=7f110ac7c8e6a98b7507418f3ffd7865ac6395dfc94589492c1d99e114b6b8f8
+)
+sudo mkdir -p "${WORK}/mnt/retroid_loader"
+for dev in rp5 flip2 rpmini rpminiv2; do
+    f="u-boot-sm8250-retroidpocket-${dev}.img"
+    curl -fsSL -o "${WORK}/${f}" "${RETROID_UBOOT_URL}/${f}"
+    echo "${RETROID_UBOOT_SHA[$dev]}  ${WORK}/${f}" | sha256sum -c - >/dev/null
+    sudo cp "${WORK}/${f}" "${WORK}/mnt/retroid_loader/${f}"
+done
+printf '%s\n' \
+    "Fixed Retroid U-Boot loader images (rp-v1.0.1, github.com/RetroidPocket/u-boot)." \
+    "If your boot menu / GRUB renders garbled (Mini V2 after a Retroid Android OTA)," \
+    "boot Armada and run:  sudo armada-flash-loader" \
+    "Or from a PC in fastboot mode (Vol- + Power):" \
+    "  fastboot flash loader u-boot-sm8250-retroidpocket-<your-device>.img" \
+    | sudo tee "${WORK}/mnt/retroid_loader/README" >/dev/null
+
 # SM8250 boots via GRUB/EFI (see D1); other SoCs fall through to /KERNEL when EFI is absent.
 if [ "${ARMADA_GRUB_BOOT:-0}" != "1" ]; then
     if [ -d "${WORK}/mnt/EFI" ]; then sudo mv "${WORK}/mnt/EFI" "${WORK}/mnt/EFI.disabled"; fi
