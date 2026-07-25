@@ -9,7 +9,9 @@ fi
 STEAM_BOOTSTRAP_HOME="${STEAM_BOOTSTRAP_HOME:-/var/lib/armada/steam-bootstrap-home}"
 STEAM="${STEAM_BOOTSTRAP_HOME}/.local/share/Steam"
 DOT_STEAM="${STEAM_BOOTSTRAP_HOME}/.steam"
-STEAM_ARM_RUNTIME_URL="https://repo.steampowered.com/steamrt3c/images/latest-public-beta/steam-runtime-steamrt-arm64.tar.xz"
+# Pinned snapshot: Valve's latest-* alias dirs started returning 403 (2026-07);
+# versioned dirs still serve. Bump deliberately when validating a new runtime.
+STEAM_ARM_RUNTIME_URL="https://repo.steampowered.com/steamrt3c/images/3c.0.20260714.251839/steam-runtime-steamrt-arm64.tar.xz"
 STEAM_ARM_CHANNEL="steamdeck_publicbeta"
 STEAM_ARM_CDN="https://client-update.steamstatic.com"
 STEAM_ARM_MANIFEST_NAME="steam_client_${STEAM_ARM_CHANNEL}_linuxarm64"
