@@ -5,6 +5,17 @@ dnf5 -y install --nogpgcheck \
     --repofrompath 'terra,https://repos.fyralabs.com/terra$releasever' \
     terra-release
 
+# Terra's repomd.xml is signed with a key newer than the terra-gpg-keys package
+# ships ("Signing key not found" kills every dnf run once the repo is enabled).
+# Skip the repo-METADATA signature; package signatures are still checked.
+for f in /etc/yum.repos.d/terra*.repo; do
+    if grep -q '^repo_gpgcheck=' "$f"; then
+        sed -i 's/^repo_gpgcheck=.*/repo_gpgcheck=0/' "$f"
+    else
+        sed -i '/^\[/a repo_gpgcheck=0' "$f"
+    fi
+done
+
 dnf5 -y install --setopt=install_weak_deps=False \
     sddm \
     pipewire \
