@@ -1,6 +1,19 @@
 #!/bin/bash
 set -euxo pipefail
 
+# /etc/armada scripts are bind-mounted OVER their /usr/libexec/armada twins at
+# boot (sm8250-bringup-early.sh), so a drifted pair means the /usr fix never
+# runs on devices (bit us: e984fd7's FEX_MULTIBLOCK removal was dead for two
+# releases). Refuse to build with drifted copies.
+for f in /ctx/system_files/etc/armada/*; do
+    b=$(basename "${f}")
+    twin="/ctx/system_files/usr/libexec/armada/${b}"
+    if [ -f "${twin}" ] && ! cmp -s "${f}" "${twin}"; then
+        echo "ERROR: etc/armada/${b} differs from usr/libexec/armada/${b} — sync them (etc is bind-mounted over usr at boot)" >&2
+        exit 1
+    fi
+done
+
 cp -a /ctx/system_files/. /
 install -Dpm 0755 /packages/extest/libextest.so /usr/lib/extest/libextest.so
 
