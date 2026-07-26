@@ -22,6 +22,15 @@
 #      regenerates the ESP payload via armada-grub-efi-update (repoints GRUB at
 #      internal). BOOTAA64.EFI + DTBs are preserved.
 #
+# Hardening (additive; the install logic above is unchanged):
+#   * Everything is logged to /var/log/armada-install.log (+ .trace), and the
+#     log + GPT backup are copied onto the SD ESP (/boot/efi/armada-install/)
+#     at the end of EVERY run — the SD survives any internal-storage disaster
+#     and its ESP is FAT32, readable in any PC card reader.
+#   * Preflights: battery >= 30% or charging, supported device model, free
+#     space, required tools. --force overrides the refusals (never the checks
+#     that protect other partitions).
+#
 # Recovery is "boot the SD and undo" — no EDL/XBL/ABL bytes are written. See the
 # user guide: docs/notes/internal-install-user-guide.md
 #
@@ -32,6 +41,7 @@ set -euo pipefail
 # ---- shared helpers (same the shipped tooling uses) -------------------------
 source /usr/lib/armada/bootimg-args     # armada_default_bls_entry
 source /usr/lib/armada/storage-lib      # armada_internal_device
+source /usr/lib/armada/install-internal-lib   # ii_* logging/persist + preflights
 
 ARMADA_REGISTRY="ghcr.io/jsbonsai/armada-865"
 ESP_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
@@ -47,10 +57,12 @@ ANDROID_DEFAULT_MIB=$((20 * 1024))
 
 BTRFS_OPTS="noatime,compress=zstd:1,discard=async,space_cache=v2"
 GRUB_EFI_UPDATE=/usr/libexec/armada/armada-grub-efi-update
+INSTALL_LOG=/var/log/armada-install.log
 
 # ---- CLI --------------------------------------------------------------------
 DEVICE="${ARMADA_INTERNAL_DEVICE:-$(armada_internal_device || true)}"
 ASSUME_YES=0
+FORCE=0
 ANDROID_GIB=""
 ARMADA_GIB=""
 GPT_BACKUP=""
@@ -80,8 +92,13 @@ Other options:
                         Armada incl. games) — Android and the GPT are untouched
   --device /dev/sdX     internal disk (default: autodetected = ${DEVICE:-<none>})
   --gpt-backup PATH     where to write the GPT backup (default: /root/…)
+  --force               override the battery / device-model / free-space
+                        preflight refusals (partition safety checks still apply)
   -y, --yes             skip the confirmation prompt
   -h, --help            this help
+
+Every run logs to ${INSTALL_LOG} and copies the log + GPT backup onto the SD
+ESP (/boot/efi/armada-install/ — FAT32, readable in any PC card reader).
 
 Subcommands:
   gui                   desktop (zenity) front-end — install, reinstall, remove
@@ -95,7 +112,8 @@ step() { echo; echo ">>> $*"; }
 
 # ---- lifecycle --------------------------------------------------------------
 # Surfaced only after internal storage was modified, so a mid-run failure tells
-# the user how to recover rather than leaving a silent half-install.
+# the user how to recover rather than leaving a silent half-install. Runs on
+# EVERY exit; ii_persist_artifacts copies the evidence onto the SD ESP.
 cleanup() {
     local rc=$?
     [[ -n "$INHIBIT_PID" ]] && kill "$INHIBIT_PID" 2>/dev/null || true
@@ -108,6 +126,7 @@ ERROR: reinstall did not finish. Android and the partition table are untouched;
   only the internal Armada ESP/ROOT contents may be incomplete. Do NOT rely on
   internal boot yet. Recover: boot the SD (untouched) and re-run:
     armada-865-install-internal --overwrite
+  Full log: ${II_LOG:-$INSTALL_LOG} (a copy is on the SD ESP in /boot/efi/armada-install/)
 EOF
         else
             cat >&2 <<EOF
@@ -116,19 +135,25 @@ ERROR: install did not finish after internal storage was modified.
   Android was factory-reset but is otherwise intact; the internal ESP/ROOT may be
   incomplete. Do NOT rely on internal boot yet.
   Recover: re-insert the SD card, boot it (it is untouched), and re-run this
-  installer. To fully back out, restore the GPT backup:
+  installer. If the re-run reports a partial Armada layout, clean it up first:
+    armada-865-uninstall-internal --keep-free
+  To fully back out, restore the GPT backup:
     sgdisk --load-backup=${GPT_BACKUP:-<backup>} ${DEVICE}
+  Full log: ${II_LOG:-$INSTALL_LOG} (a copy is on the SD ESP in /boot/efi/armada-install/)
 EOF
         fi
     fi
+    ii_persist_artifacts
     exit $rc
 }
 
-# Block suspend/idle for the whole run: a suspend mid-repartition/deploy could
-# corrupt the internal layout.
+# Block suspend/idle AND the power/suspend keys for the whole run: a suspend —
+# or a habitual power-button press — mid-repartition/deploy could corrupt the
+# internal layout.
 inhibit_sleep() {
     command -v systemd-inhibit >/dev/null 2>&1 || return 0
-    systemd-inhibit --what=sleep:idle --who="Armada Internal Installer" \
+    systemd-inhibit --what=sleep:idle:shutdown:handle-power-key:handle-suspend-key \
+        --who="Armada Internal Installer" \
         --why="writing internal storage" --mode=block sleep infinity &
     INHIBIT_PID=$!
 }
@@ -137,7 +162,7 @@ need_root() { [[ $EUID -eq 0 ]] || die "must run as root"; }
 
 need_cmds() {
     local cmd missing=0
-    for cmd in blkid btrfs cp findmnt jq lsblk mkfs.btrfs mkfs.vfat ostree parted partprobe realpath sfdisk sgdisk udevadm; do
+    for cmd in awk blkid blockdev btrfs cp dd findmnt jq lsblk mkfs.btrfs mkfs.vfat ostree parted partprobe realpath sfdisk sgdisk udevadm; do
         command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: missing required command: $cmd" >&2; missing=1; }
     done
     (( missing == 0 )) || exit 1
@@ -302,6 +327,7 @@ backup_gpt() {
     [[ -s $GPT_BACKUP ]] || die "GPT backup is empty; refusing to continue"
     echo "GPT backed up to: $GPT_BACKUP"
     echo "  (restore with:  sgdisk --load-backup=$GPT_BACKUP $DEVICE )"
+    echo "  (a copy lands on the SD ESP in /boot/efi/armada-install/ at the end of the run)"
 }
 
 # ---- partitioning -----------------------------------------------------------
@@ -342,6 +368,20 @@ partition_disk() {
 
     # Zero the new Android userdata superblock so Android factory-resets cleanly.
     dd if=/dev/zero of="$UD_PART" bs=1M count=8 status=none
+}
+
+# Reinstall-only: unmount anything still using the existing internal partitions
+# (e.g. a manual rescue mount of internal root to copy games off) before they
+# are reformatted — otherwise mkfs fails with a cryptic error mid-run.
+umount_existing() {
+    local part tgt
+    for part in "$ESP_PART" "$ROOT_PART"; do
+        while IFS= read -r tgt; do
+            [[ -n $tgt ]] || continue
+            echo "Unmounting $tgt (was $part)"
+            umount -R "$tgt" 2>/dev/null || true
+        done < <(findmnt -rn -o TARGET -S "$part" 2>/dev/null | sort -r || true)
+    done
 }
 
 # ---- ESP staging (copy the proven SD payload; NO flash) ---------------------
@@ -557,6 +597,7 @@ parse_args() {
             --gpt-backup) GPT_BACKUP="${2:-}"; shift ;;
             --gpt-backup=*) GPT_BACKUP="${1#*=}" ;;
             --overwrite) OVERWRITE=1 ;;
+            --force) FORCE=1 ;;
             -y|--yes) ASSUME_YES=1 ;;
             -h|--help) usage 0 ;;
             *) echo "ERROR: unknown argument: $1" >&2; usage ;;
@@ -568,13 +609,32 @@ parse_args() {
 main() {
     parse_args "$@"
     need_root
+
+    # From here every line is mirrored into the persistent log, every failure
+    # names its line/command, and cleanup() (log/backup copies onto the SD ESP)
+    # runs on every exit — even an early die.
+    ii_log_init "$INSTALL_LOG" "$@"
+    ii_set_err_trap
+    trap cleanup EXIT
+
     need_cmds
     check_device
     refuse_self
     check_sd_esp
+
+    step "Preflight (override refusals with --force)"
+    check_model
+    check_power
+    check_free_space
+
     detect_existing
 
     if (( REINSTALL )); then
+        # --overwrite reuses the existing partitions, so a size flag would be
+        # silently ignored — refuse loudly instead of letting the user believe
+        # they resized.
+        [[ -z $ANDROID_GIB && -z $ARMADA_GIB ]] || die "--overwrite keeps the existing partition sizes; --android-size/--armada-size have no effect here.
+  To change the split: armada-865-uninstall-internal --keep-free, then re-run this installer fresh."
         local esp_gib root_gib
         esp_gib=$(( $(blockdev --getsize64 "$ESP_PART") / 1073741824 ))
         root_gib=$(( $(blockdev --getsize64 "$ROOT_PART") / 1073741824 ))
@@ -588,18 +648,28 @@ Reinstall plan for ${DEVICE} (existing partitions reused, GPT untouched):
 
 EOF
         confirm "Proceed with the reinstall (wipes internal Armada)?" || { echo "Aborted."; exit 0; }
-        trap cleanup EXIT
         inhibit_sleep
         destructive=1
+        step "Unmounting anything still using the internal Armada partitions"
+        umount_existing
         step "Staging ARMADA_ESP from the SD payload (reformat, no flash)"
         stage_esp
         deploy_root
         cat <<EOF
 
-Reinstall complete.
-  Power off, remove the SD card, then power on. Hold Vol+ through the Android
-  splash to reach the internal GRUB menu.
+==============================================================
+Reinstall complete — summary
+  Device        : ${DEVICE}
+  ARMADA_ESP    : ${ESP_PART} — reformatted and restaged from the SD
+  ARMADA_ROOT   : ${ROOT_PART} — wiped, booted commit redeployed
+  Android / GPT : untouched
+  Install log   : ${II_LOG:-$INSTALL_LOG}
+  SD ESP copies : /boot/efi/armada-install/ (PC-readable, survives poweroff)
 
+Next steps:
+  1. Power off, remove the SD card, then power on.
+  2. Hold Vol+ through the Android splash to reach the internal GRUB menu.
+==============================================================
 EOF
         return 0
     fi
@@ -623,7 +693,6 @@ Plan for ${DEVICE} (4K-sector UFS):
 EOF
     confirm "Proceed with these destructive partition changes?" || { echo "Aborted."; exit 0; }
 
-    trap cleanup EXIT
     inhibit_sleep
 
     step "Backing up the internal GPT"
@@ -639,11 +708,24 @@ EOF
 
     cat <<EOF
 
-Install complete.
-  Power off, remove the SD card, then power on. Hold Vol+ through the Android
-  splash to reach the internal GRUB menu.
-  Rollback: re-insert the SD and boot it (untouched). GPT backup: ${GPT_BACKUP}
+==============================================================
+Install complete — summary
+  Device        : ${DEVICE}
+  Android       : ${NEW_UD_GIB} GiB (factory-reset; apps/data wiped, OS kept)
+  ARMADA_ESP    : ${ESP_PART} (${ESP_MIB} MiB FAT32, staged from the SD)
+  ARMADA_ROOT   : ${ROOT_PART} (~${ARMADA_ROOT_GIB} GiB btrfs, booted commit deployed)
+  GPT backup    : ${GPT_BACKUP}
+  Install log   : ${II_LOG:-$INSTALL_LOG}
+  SD ESP copies : /boot/efi/armada-install/ (log + GPT backup; readable in any
+                  PC card reader — keep the SD as your rescue key)
 
+Next steps:
+  1. Power off, remove the SD card, then power on.
+  2. Hold Vol+ through the Android splash to reach the internal GRUB menu.
+
+Rollback: re-insert the SD and boot it (untouched). Full undo:
+  sgdisk --load-backup=${GPT_BACKUP} ${DEVICE}
+==============================================================
 EOF
 }
 
@@ -749,8 +831,8 @@ gui_install_flow() {
         || exit 0
 
     gui_run "Installing Armada, do not power off…" "$SELF" --yes --android-size "$android" \
-        || gui_die "Install failed (details in ${GUI_LOG}).\n\nBoot the SD again and re-run this installer to recover."
-    gui_offer_poweroff "<b>Install complete.</b>\n\nPower off, remove the SD card, then power on holding <b>Vol+</b>."
+        || gui_die "Install failed.\n\nFull log: ${PERSIST_LOG}\nSD copy: ${ESP_COPIES}/ (readable on any PC, survives poweroff)\n\nBoot the SD again and re-run this installer to recover."
+    gui_offer_poweroff "<b>Install complete.</b>\n\nPower off, remove the SD card, then power on holding <b>Vol+</b>.\n\nA GPT backup + the full install log were saved to the SD's boot\npartition (armada-install folder) — keep the SD as your rescue key."
 }
 
 gui_manage_flow() {
@@ -768,15 +850,15 @@ gui_manage_flow() {
             --text="<b>Reinstall Armada?</b>\n\nInternal Armada — including installed games and saves — is <b>wiped</b>\nand replaced with this SD's version.\n\nAndroid and the partition layout are untouched." \
             || exit 0
         gui_run "Reinstalling Armada, do not power off…" "$SELF" --yes --overwrite \
-            || gui_die "Reinstall failed (details in ${GUI_LOG}).\n\nAndroid is untouched. Boot the SD again and retry."
+            || gui_die "Reinstall failed.\n\nAndroid is untouched.\nFull log: ${PERSIST_LOG}\nSD copy: ${ESP_COPIES}/ (readable on any PC)\n\nBoot the SD again and retry."
         gui_offer_poweroff "<b>Reinstall complete.</b> Android is unchanged.\n\nPower off, remove the SD card, then power on holding <b>Vol+</b>."
     elif [[ "$out" == "Remove & Restore Android" ]]; then
         zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=500 --no-wrap \
             --ok-label="Remove" --cancel-label="Cancel" \
-            --text="<b>Remove Armada and give all storage back to Android?</b>\n\nThis ERASES internal Armada and factory-resets Android.\n<b>It can't be undone.</b>" \
+            --text="<b>Remove Armada and give all storage back to Android?</b>\n\nThis ERASES internal Armada and factory-resets Android.\n<b>It can't be undone.</b>\n\nThe partition table is backed up first to the SD's boot partition\n(armada-install folder). This restore path has had limited hardware\ntesting — keep the SD card until Android boots clean." \
             || exit 0
         gui_run "Removing Armada, do not power off…" "$UNINSTALLER" --yes --reclaim \
-            || gui_die "Remove failed (details in ${GUI_LOG})."
+            || gui_die "Remove failed.\n\nFull log: ${PERSIST_UNLOG}\nSD copy: ${ESP_COPIES}/ (readable on any PC)"
         gui_offer_poweroff "<b>Armada removed.</b> Android has the full internal disk again.\n\nPower off and remove the SD card to boot Android, or relaunch to install Armada."
     fi
 }
@@ -785,10 +867,23 @@ cmd_gui() {
     GUI_TITLE="Armada Installer"
     GUI_ICON="drive-harddisk"
     GUI_LOG=/tmp/armada-865-install.log
-    command -v zenity >/dev/null 2>&1 || { echo "zenity not installed" >&2; exit 1; }
+    # Persistent evidence is written by the privileged runs themselves (the
+    # tmpfs GUI_LOG dies at poweroff; these survive on the SD):
+    PERSIST_LOG=/var/log/armada-install.log
+    PERSIST_UNLOG=/var/log/armada-uninstall.log
+    ESP_COPIES=/boot/efi/armada-install
+    if ! command -v zenity >/dev/null 2>&1; then
+        # Terminal=false in the desktop entry: without a fallback dialog this
+        # launch would be a silent no-op.
+        echo "zenity not installed" >&2
+        command -v kdialog >/dev/null 2>&1 && kdialog --error "Armada Installer: zenity is missing from this build." 2>/dev/null || true
+        command -v notify-send >/dev/null 2>&1 && notify-send "Armada Installer" "zenity is missing from this build." 2>/dev/null || true
+        exit 1
+    fi
 
-    local info gmode
-    info=$(sudo "$SELF" detect 2>/dev/null) || gui_die "Couldn't inspect internal storage."
+    local info gmode fname
+    info=$(sudo "$SELF" detect 2>"$GUI_LOG.detect") \
+        || gui_die "Couldn't inspect internal storage.\n\n$(esc "$(tail -n 5 "$GUI_LOG.detect" 2>/dev/null)")"
     gmode=$(sed -n 's/^mode=//p' <<<"$info")
     case "$gmode" in
         fresh)    gui_install_flow "$info" ;;
@@ -797,7 +892,21 @@ cmd_gui() {
             local need
             need=$(sed -n 's/^needed_gib=//p' <<<"$info")
             gui_die "Internal storage is too small to install Armada.\n\nArmada needs about ${need} GB free on internal storage." ;;
-        foreign)  gui_die "Internal storage has an unrecognized Linux layout.\n\nThis tool only manages installs it created." ;;
+        foreign)
+            fname=$(sed -n 's/^name=//p' <<<"$info")
+            if [[ $fname == partial-armada-layout ]]; then
+                # A half-created layout is almost always OUR interrupted install
+                # (e.g. power loss mid-partitioning) — offer the recovery instead
+                # of a dead end.
+                zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=500 --no-wrap \
+                    --ok-label="Clean up" --cancel-label="Cancel" \
+                    --text="<b>An interrupted Armada install was found on internal storage.</b>\n\nClean it up now? Only the half-created Armada partitions are removed\n(Android is untouched), then the installer starts over." \
+                    || exit 0
+                gui_run "Cleaning up the interrupted install…" "$UNINSTALLER" --yes --keep-free \
+                    || gui_die "Cleanup failed.\n\nFull log: ${PERSIST_UNLOG}\nSD copy: ${ESP_COPIES}/ (readable on any PC)"
+                exec "$SELF" gui
+            fi
+            gui_die "Internal storage has an unrecognized Linux layout.\n\nThis tool only manages installs it created." ;;
         *)        gui_die "Unexpected internal-storage state: ${gmode:-unknown}." ;;
     esac
 }

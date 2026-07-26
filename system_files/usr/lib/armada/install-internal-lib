@@ -1,0 +1,163 @@
+#!/usr/bin/bash
+# install-internal-lib — shared hardening helpers for the internal-storage
+# tools (armada-865-install-internal / armada-865-uninstall-internal).
+#
+# Sourced, never executed. Everything here is ADDITIVE safety around the
+# validated install/uninstall logic — persistent logging, failure reporting,
+# and preflight checks — so a failed run always leaves evidence, and a dying
+# battery or an unproven board can't half-install a handheld:
+#
+#   ii_log_init           tee all output to a persistent /var/log file, with a
+#                         timestamped run header + a per-command timestamped
+#                         xtrace side-file (.trace)
+#   ii_set_err_trap       log the exact failing line/command on any error
+#   ii_persist_artifacts  copy log + trace + GPT backup onto the SD ESP
+#                         (FAT32 — readable in any PC card reader; the SD
+#                         survives any internal-storage disaster)
+#   check_power           refuse on low battery unless charging (or --force)
+#   check_model           refuse device models the no-flash boot chain is not
+#                         validated on (or --force)
+#   check_free_space      refuse when the SD is too full to log safely
+#
+# Callers must define die() and set: FORCE (0/1), SD_ESP (default /boot/efi),
+# and GPT_BACKUP (may be empty until their backup_gpt has run).
+
+II_LOG=""                          # persistent log path; "" until ii_log_init
+II_TRACE=""                        # xtrace side-file next to II_LOG
+II_ESP_COPY_DIR=armada-install     # folder created on the SD ESP for copies
+BATTERY_MIN_PCT=30
+
+# ii_log_init LOGFILE [argv...] — mirror all stdout/stderr into LOGFILE
+# (append, with a timestamped run header naming the invocation) and write a
+# per-command timestamped trace to LOGFILE's .trace sibling (fd 9), keeping
+# the user-facing output clean. Best-effort: an unwritable /var/log warns and
+# continues rather than blocking an install.
+ii_log_init() {
+    local log="$1"; shift || true
+    { mkdir -p "$(dirname "$log")" && touch "$log"; } 2>/dev/null \
+        || { echo "WARNING: cannot write $log; continuing without a persistent log" >&2; return 0; }
+    II_LOG="$log"
+    II_TRACE="${log%.log}.trace"
+    # Cap growth: roll to .old past ~1 MiB (log) / ~4 MiB (trace) — keeps
+    # exactly one previous generation of each.
+    if (( $(wc -c 2>/dev/null <"$II_LOG" || echo 0) > 1048576 )); then
+        mv -f "$II_LOG" "$II_LOG.old" 2>/dev/null || true
+        touch "$II_LOG" 2>/dev/null || true
+    fi
+    if (( $(wc -c 2>/dev/null <"$II_TRACE" || echo 0) > 4194304 )); then
+        mv -f "$II_TRACE" "$II_TRACE.old" 2>/dev/null || true
+    fi
+    printf '\n===== %s  %s %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${0##*/}" "$*" >>"$II_LOG"
+    exec > >(tee -a "$II_LOG") 2>&1
+    if touch "$II_TRACE" 2>/dev/null; then
+        exec 9>>"$II_TRACE"
+        printf '\n===== %s  %s %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${0##*/}" "$*" >&9
+        BASH_XTRACEFD=9
+        PS4='+ [${EPOCHREALTIME:-?}] '
+        set -x
+    fi
+    echo "Logging to: $II_LOG (trace: $II_TRACE)"
+}
+
+# Report the exact failing command into the (tee'd) log before set -e unwinds
+# into cleanup(). set -E makes the ERR trap inherit into functions.
+ii_set_err_trap() {
+    set -E
+    trap 'echo "!! FAILED (exit $?) at line ${LINENO} in ${FUNCNAME[0]:-main}: ${BASH_COMMAND}" >&2' ERR
+}
+
+# Copy the run's evidence onto the SD ESP: FAT32, so it is readable in any PC
+# card reader, and the SD survives whatever happened to internal storage.
+# Called from cleanup() on EVERY exit, success or failure. Best-effort by
+# design — this must never fail the run or mask its exit code.
+ii_persist_artifacts() {
+    local esp="${SD_ESP:-/boot/efi}" dest
+    dest="$esp/$II_ESP_COPY_DIR"
+    findmnt -rn "$esp" >/dev/null 2>&1 || return 0
+    mkdir -p "$dest" 2>/dev/null || return 0
+    sleep 0.2 2>/dev/null || true      # let the tee from ii_log_init drain
+    [[ -n $II_LOG   && -s $II_LOG   ]] && cp -f "$II_LOG"   "$dest/" 2>/dev/null || true
+    [[ -n $II_TRACE && -s $II_TRACE ]] && cp -f "$II_TRACE" "$dest/" 2>/dev/null || true
+    [[ -n ${GPT_BACKUP:-} && -s ${GPT_BACKUP:-} ]] && cp -f "$GPT_BACKUP" "$dest/" 2>/dev/null || true
+    sync
+    echo "Copies saved to ${dest}/ (SD boot partition — readable in any PC card reader)."
+}
+
+# Refuse to start when the battery can't be trusted to survive the run: a
+# power loss mid-repartition/deploy is the single most likely way a user ends
+# up with a half-install. Tolerant of absent/odd sysfs nodes — no battery
+# reported means pass (bench PSU, VM, stripped DT).
+check_power() {
+    local psy typ cap status online batt_seen=0 ok=0 report=""
+    for psy in /sys/class/power_supply/*; do
+        [[ -d $psy ]] || continue
+        typ=$(cat "$psy/type" 2>/dev/null) || continue
+        case "$typ" in
+            Battery)
+                cap=$(cat "$psy/capacity" 2>/dev/null) || continue
+                [[ $cap =~ ^[0-9]+$ ]] || continue
+                batt_seen=1
+                status=$(cat "$psy/status" 2>/dev/null) || status=Unknown
+                report+="${psy##*/}: ${cap}% (${status:-Unknown})  "
+                if (( cap >= BATTERY_MIN_PCT )) || [[ $status == Charging || $status == Full ]]; then
+                    ok=1
+                fi
+                ;;
+            Mains|USB*|Wireless)
+                online=$(cat "$psy/online" 2>/dev/null) || online=0
+                if [[ $online == 1 ]]; then
+                    ok=1
+                    report+="${psy##*/}: plugged in  "
+                fi
+                ;;
+        esac
+    done
+    if (( batt_seen == 0 )); then
+        echo "Power: no battery reported by the kernel — skipping the battery check"
+        return 0
+    fi
+    echo "Power: ${report}"
+    (( ok )) && return 0
+    if (( FORCE )); then
+        echo "WARNING: battery under ${BATTERY_MIN_PCT}% and not charging — continuing because of --force"
+        return 0
+    fi
+    die "battery is under ${BATTERY_MIN_PCT}% and not charging. Plug in the charger first — a power loss while internal storage is being rewritten leaves a half-install. Override with --force."
+}
+
+# The no-flash internal boot chain is only validated on specific Retroid
+# boards (docs/research/internal-flashing-SYNTHESIS.md); refuse anything else
+# — or an unreadable model — unless --force.
+check_model() {
+    local envout id="" name=""
+    envout=$(/usr/libexec/armada/device-env 2>/dev/null) || envout=""
+    if [[ -n $envout ]]; then
+        id=$(eval "$envout"; printf '%s' "${ARMADA_DEVICE_ID:-}")
+        name=$(eval "$envout"; printf '%s' "${ARMADA_DEVICE_NAME:-}")
+    fi
+    case "$id" in
+        retroid-pocket-5|retroid-pocket-flip-2|retroid-pocket-mini-v2)
+            echo "Device: ${name:-$id} (${id}) — supported for internal install"
+            return 0 ;;
+    esac
+    if (( FORCE )); then
+        echo "WARNING: device model '${id:-unknown}' is not on the supported list — continuing because of --force"
+        return 0
+    fi
+    die "device model '${id:-unknown}' is not supported for internal install (validated: Retroid Pocket 5 / Flip 2 / Mini V2). Override with --force."
+}
+
+# The SD must have room for the logs (and ESP copies); a full SD produces
+# confusing downstream failures, so catch it up front.
+check_free_space() {
+    local kb
+    kb=$(df -Pk /var/log 2>/dev/null | awk 'NR==2 {print $4}') || kb=""
+    if [[ $kb =~ ^[0-9]+$ ]] && (( kb < 65536 )); then
+        if (( FORCE )); then
+            echo "WARNING: only $(( kb / 1024 )) MiB free on /var — continuing because of --force"
+            return 0
+        fi
+        die "only $(( kb / 1024 )) MiB free on /var (the SD is nearly full); free at least 64 MiB or override with --force"
+    fi
+    return 0
+}

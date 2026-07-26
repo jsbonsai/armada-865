@@ -34,5 +34,6 @@ cat > /etc/sudoers.d/armada-user <<'EOF'
 %wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/armada-installer *
 %wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/armada-865-install-internal *
 %wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/armada-865-uninstall-internal *
+%wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/armada-release-test
 EOF
 chmod 0440 /etc/sudoers.d/armada-user

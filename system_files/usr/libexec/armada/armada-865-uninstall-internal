@@ -19,6 +19,11 @@
 #        --keep-free       — leaves the freed space unallocated so you can re-run
 #          armada-865-install-internal immediately (the "reinstall / try again" path).
 #
+# Hardening (additive, shared with the installer via install-internal-lib):
+# every run is logged to /var/log/armada-uninstall.log, the log + GPT backup
+# are copied onto the SD ESP (/boot/efi/armada-install/, FAT32 — PC-readable),
+# and battery/model/space preflights refuse a risky start (--force overrides).
+#
 # After a reclaim: boot Android (power on WITHOUT holding Vol+) and let it
 # re-initialise storage. The SD card still boots Armada, unchanged.
 #
@@ -27,14 +32,19 @@
 
 set -euo pipefail
 
-# ---- shared helper (same lib the installer uses) ----------------------------
+# ---- shared helpers (same libs the installer uses) --------------------------
 source /usr/lib/armada/storage-lib      # armada_internal_device
+source /usr/lib/armada/install-internal-lib   # ii_* logging/persist + preflights
+
+UNINSTALL_LOG=/var/log/armada-uninstall.log
 
 # ---- CLI --------------------------------------------------------------------
 DEVICE="${ARMADA_INTERNAL_DEVICE:-$(armada_internal_device || true)}"
 ASSUME_YES=0
+FORCE=0
 GPT_BACKUP=""
 MODE=reclaim                # reclaim | keep-free
+SD_ESP="/boot/efi"          # the running SD's mounted ESP (evidence copies)
 
 # ---- run state (for cleanup) ------------------------------------------------
 destructive=0
@@ -56,8 +66,13 @@ Mode (choose at most one; default: reclaim):
 Other options:
   --device /dev/sdX     internal disk (default: autodetected = ${DEVICE:-<none>})
   --gpt-backup PATH     where to write the GPT backup (default: /root/…)
+  --force               override the battery / device-model / free-space
+                        preflight refusals (partition safety checks still apply)
   -y, --yes             skip the confirmation prompt
   -h, --help            this help
+
+Every run logs to ${UNINSTALL_LOG} and copies the log + GPT backup onto the SD
+ESP (/boot/efi/armada-install/ — FAT32, readable in any PC card reader).
 EOF
     exit "${1:-2}"
 }
@@ -66,6 +81,7 @@ die()  { echo "ERROR: $*" >&2; exit 1; }
 step() { echo; echo ">>> $*"; }
 
 # ---- lifecycle --------------------------------------------------------------
+# Runs on EVERY exit; ii_persist_artifacts copies the evidence onto the SD ESP.
 cleanup() {
     local rc=$?
     [[ -n "$INHIBIT_PID" ]] && kill "$INHIBIT_PID" 2>/dev/null || true
@@ -77,15 +93,20 @@ ERROR: uninstall did not finish after the partition table was modified.
   Recover by restoring the GPT backup from the SD system:
     sgdisk --load-backup=${GPT_BACKUP:-<backup>} ${DEVICE}
   The SD card is untouched and still boots Armada.
+  Full log: ${II_LOG:-$UNINSTALL_LOG} (a copy is on the SD ESP in /boot/efi/armada-install/)
 EOF
     fi
+    ii_persist_artifacts
     exit $rc
 }
 trap cleanup EXIT
 
+# Block suspend/idle AND the power/suspend keys for the whole run: a suspend —
+# or a habitual power-button press — mid-repartition could corrupt the layout.
 inhibit_sleep() {
     command -v systemd-inhibit >/dev/null 2>&1 || return 0
-    systemd-inhibit --what=sleep:idle --who="Armada Internal Uninstaller" \
+    systemd-inhibit --what=sleep:idle:shutdown:handle-power-key:handle-suspend-key \
+        --who="Armada Internal Uninstaller" \
         --why="rewriting internal storage" --mode=block sleep infinity &
     INHIBIT_PID=$!
 }
@@ -198,6 +219,7 @@ backup_gpt() {
     [[ -s $GPT_BACKUP ]] || die "GPT backup is empty; refusing to continue"
     echo "GPT backed up to: $GPT_BACKUP"
     echo "  (restore with:  sgdisk --load-backup=$GPT_BACKUP $DEVICE )"
+    echo "  (a copy lands on the SD ESP in /boot/efi/armada-install/ at the end of the run)"
 }
 
 # ---- the work ---------------------------------------------------------------
@@ -266,12 +288,14 @@ reclaim_userdata() {
 }
 
 # ---- args -------------------------------------------------------------------
+SCRIPT_ARGS="$*"            # kept for the persistent-log run header
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --reclaim)     MODE=reclaim ;;
         --keep-free)   MODE=keep-free ;;
         --device)      DEVICE="${2:?}"; shift ;;
         --gpt-backup)  GPT_BACKUP="${2:?}"; shift ;;
+        --force)       FORCE=1 ;;
         -y|--yes)      ASSUME_YES=1 ;;
         -h|--help)     usage 0 ;;
         *)             echo "unknown option: $1" >&2; usage 2 ;;
@@ -281,9 +305,21 @@ done
 
 # ---- main -------------------------------------------------------------------
 need_root
+
+# From here every line is mirrored into the persistent log and every failure
+# names its line/command; cleanup() copies the evidence onto the SD ESP.
+ii_log_init "$UNINSTALL_LOG" "$SCRIPT_ARGS"
+ii_set_err_trap
+
 need_cmds
 check_device
 refuse_self
+
+step "Preflight (override refusals with --force)"
+check_model
+check_power
+check_free_space
+
 find_targets
 require_targets_trailing
 print_plan
@@ -302,7 +338,30 @@ step "Done."
 parted -s "$DEVICE" print 2>/dev/null || true
 cat <<EOF
 
-Internal Armada install removed.
+==============================================================
+Uninstall complete — summary
+  Device           : ${DEVICE}
+  Removed          : ${TARGET_DESC[*]}
+  Mode             : ${MODE}
+EOF
+if [[ $MODE == reclaim ]]; then
+    cat <<EOF
+  Android userdata : regrown over the freed space and wiped —
+                     Android reformats it full-size on next boot
+EOF
+else
+    cat <<EOF
+  Freed space      : left unallocated (ready for a fresh install)
+  Android userdata : unchanged
+EOF
+fi
+cat <<EOF
+  GPT backup       : ${GPT_BACKUP}
+  Uninstall log    : ${II_LOG:-$UNINSTALL_LOG}
+  SD ESP copies    : /boot/efi/armada-install/ (log + GPT backup; readable in
+                     any PC card reader)
+
+Next steps:
   * Boot Android: power on WITHOUT holding Vol+ (it re-initialises storage).
   * The SD card is untouched and still boots Armada.
 EOF
