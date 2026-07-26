@@ -23,9 +23,9 @@ trap 'sudo umount "${WORK}/p1" 2>/dev/null||true; sudo umount "${WORK}/p2" 2>/de
 mkdir -p "${WORK}/p1" "${WORK}/p2"
 
 if [[ -z "${MKBOOTIMG}" ]]; then
-    bash "${SCRIPT_DIR}/../build_files/fetch-mkbootimg.sh" "${WORK}/mkb"
-    MKBOOTIMG="${WORK}/mkb/mkbootimg.py"
+    MKBOOTIMG="${SCRIPT_DIR}/../build_files/vendor/mkbootimg/mkbootimg.py"
 fi
+[[ -x "${MKBOOTIMG}" ]] || { echo "mkbootimg not executable: ${MKBOOTIMG}"; exit 1; }
 
 sudo mount "${LOOP}p2" "${WORK}/p2"          # /boot
 

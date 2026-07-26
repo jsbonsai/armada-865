@@ -6,7 +6,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from .system import atomically_write, read_text
+from .privileged import call
+from .system import read_text
 
 INPUT_CALIBRATION_CONFIG = Path("/etc/armada/input-calibration.json")
 RSINPUT_PARAMETERS = Path("/sys/module/rsinput/parameters")
@@ -105,6 +106,11 @@ def busctl_get_property(path, interface, prop):
 
 def begin_calibration_intercept():
     try:
+        call("inputplumber_intercept", mode="overlay")
+        return True
+    except Exception:
+        pass
+    try:
         subprocess.run(
             [str(INPUTPLUMBER_INTERCEPT), "overlay"],
             check=True,
@@ -118,6 +124,11 @@ def begin_calibration_intercept():
 
 
 def end_calibration_intercept():
+    try:
+        call("inputplumber_intercept", mode="reset")
+        return True
+    except Exception:
+        pass
     try:
         subprocess.run(
             [str(INPUTPLUMBER_INTERCEPT), "reset"],
@@ -327,15 +338,6 @@ def read_calibration_params():
     return params
 
 
-def write_calibration_params(params):
-    if not calibration_can_apply():
-        raise RuntimeError("Controller calibration is not supported on this device")
-    for name in CALIBRATION_PARAMS:
-        if name in params:
-            (RSINPUT_PARAMETERS / name).write_text(str(int(params[name])), encoding="utf-8")
-    (RSINPUT_PARAMETERS / "update_params").write_text("1", encoding="utf-8")
-
-
 def reset_calibration_params():
     params = {}
     for axis in ("axis_leftx", "axis_lefty", "axis_rightx", "axis_righty"):
@@ -348,8 +350,7 @@ def reset_calibration_params():
         params[f"{trigger}_max"] = 1552
         params[f"{trigger}_deadzone"] = 0
         params[f"{trigger}_antideadzone"] = 0
-    write_calibration_params(params)
-    atomically_write(INPUT_CALIBRATION_CONFIG, json.dumps(params, indent=2, sort_keys=True) + "\n", 0o644)
+    call("write_config", name="calibration", text=json.dumps(params, indent=2, sort_keys=True) + "\n")
     return calibration_status()
 
 
@@ -381,7 +382,7 @@ def calibration_from_capture(capture, current=None):
         minimum = int(values.get("min", 0))
         maximum = int(values.get("max", 0))
         span = max(maximum - minimum, 1)
-        params[f"{name}_max"] = max(int(current.get(f"{name}_max", 1552)) - minimum, 1)
+        params[f"{name}_max"] = span
         params[f"{name}_deadzone"] = max(int(span * 0.03), 4)
         params[f"{name}_antideadzone"] = 0
     return params
@@ -393,10 +394,7 @@ def merge_capture_sample(capture, state):
         if name not in merged:
             continue
         value = int(control.get("value", 0))
-        if name in ("left_trigger", "right_trigger"):
-            merged[name]["min"] = value
-        else:
-            merged[name]["min"] = min(int(merged[name].get("min", value)), value)
+        merged[name]["min"] = min(int(merged[name].get("min", value)), value)
         merged[name]["max"] = max(int(merged[name].get("max", value)), value)
     return merged
 
@@ -413,8 +411,7 @@ def calibration_status():
 def save_calibration(capture):
     capture = merge_capture_sample(capture, controller_state())
     params = calibration_from_capture(capture, read_calibration_params())
-    write_calibration_params(params)
-    atomically_write(INPUT_CALIBRATION_CONFIG, json.dumps(params, indent=2, sort_keys=True) + "\n", 0o644)
+    call("write_config", name="calibration", text=json.dumps(params, indent=2, sort_keys=True) + "\n")
     return calibration_status()
 
 

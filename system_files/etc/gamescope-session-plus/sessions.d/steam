@@ -14,12 +14,18 @@ if [[ -n "${ARMADA_PANEL_REFRESH_RATES:-}" ]]; then
         unset STEAM_DISPLAY_REFRESH_LIMITS
     fi
 fi
+# Gamescope only lights up the primary panel; silence the secondary
+# touchscreen so fingers on the dark glass don't move Steam's cursor.
+# The desktop session re-enables it (see desktop-bootstrap).
+if [[ -n "${ARMADA_SECONDARY_TOUCHSCREEN:-}" ]]; then
+    /usr/libexec/armada/touchscreen-inhibit "$ARMADA_SECONDARY_TOUCHSCREEN" 1 2>/dev/null || true
+fi
 USE_ROTATION_SHADER="${ARMADA_GAMESCOPE_USE_ROTATION_SHADER:-0}"
 if [[ -n "${ARMADA_GAMESCOPE_FAKE_OUTPUT_MM:-}" ]]; then
     export GAMESCOPE_FAKE_OUTPUT_MM="$ARMADA_GAMESCOPE_FAKE_OUTPUT_MM"
 fi
 
-export STEAM_EXTRA_COMPAT_TOOLS_PATHS=/usr/share/steam/compatibilitytools.d
+export STEAM_EXTRA_COMPAT_TOOLS_PATHS="/usr/share/steam/compatibilitytools.d:${HOME}/.local/share/Steam/compatibilitytools.d"
 
 # SM8250: bring up speaker sink before Steam starts (wait for PipeWire + DMA path).
 if grep -q RetroidPocket /proc/asound/cards 2>/dev/null && [[ -x /etc/armada/sm8250-audio-init ]]; then
@@ -29,4 +35,4 @@ if grep -q RetroidPocket /proc/asound/cards 2>/dev/null && [[ -x /etc/armada/sm8
     /etc/armada/sm8250-audio-init boot || true
 fi
 
-CLIENTCMD='/usr/libexec/armada/launch-steam -gamepadui -steamos3 -steampal -steamdeck -noverifyfiles'
+CLIENTCMD='/usr/libexec/armada/launch-steam -gamepadui -steamos3 -steampal -steamdeck -noverifyfiles -noshaders'

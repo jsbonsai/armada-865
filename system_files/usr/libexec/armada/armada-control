@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+import json
+import os
+import shlex
+import socket
+import subprocess
+import tempfile
+from pathlib import Path
+
+SOCKET = Path("/run/armada/control.sock")
+MAX_REQUEST = 1024 * 1024
+CLIENT_TIMEOUT = 5
+CONTROLLER_TYPES = {"deck-uhid", "xb360", "ds5"}
+INTERCEPT_MODES = {"overlay", "reset"}
+CONFIG_PATHS = {
+    "power": Path("/etc/armada/power-profiles.conf"),
+    "tweaks": Path("/etc/armada/game-tweaks.json"),
+    "calibration": Path("/etc/armada/input-calibration.json"),
+    "compat-applied": Path("/var/lib/armada/compat-applied.json"),
+}
+CALIBRATION_PARAMS = (
+    "axis_leftx_min",
+    "axis_leftx_center",
+    "axis_leftx_max",
+    "axis_leftx_deadzone",
+    "axis_leftx_antideadzone",
+    "axis_lefty_min",
+    "axis_lefty_center",
+    "axis_lefty_max",
+    "axis_lefty_deadzone",
+    "axis_lefty_antideadzone",
+    "axis_rightx_min",
+    "axis_rightx_center",
+    "axis_rightx_max",
+    "axis_rightx_deadzone",
+    "axis_rightx_antideadzone",
+    "axis_righty_min",
+    "axis_righty_center",
+    "axis_righty_max",
+    "axis_righty_deadzone",
+    "axis_righty_antideadzone",
+    "trigger_left_max",
+    "trigger_left_deadzone",
+    "trigger_left_antideadzone",
+    "trigger_right_max",
+    "trigger_right_deadzone",
+    "trigger_right_antideadzone",
+)
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def run(command, timeout=20):
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+
+
+def ssh_enabled():
+    result = subprocess.run(
+        ["/usr/bin/systemctl", "is-active", "sshd"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    )
+    return result.stdout.strip() == "active"
+
+
+def device_env():
+    result = subprocess.check_output(["/usr/libexec/armada/device-env"], text=True, timeout=5)
+    env = {}
+    for line in result.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        try:
+            env[key] = shlex.split(value)[0] if value else ""
+        except ValueError:
+            env[key] = value
+    return env
+
+
+def action_set_controller_type(request):
+    value = str(request.get("value", ""))
+    if value not in CONTROLLER_TYPES:
+        raise ValueError("invalid controller type")
+    run(["/usr/libexec/armada/controller-type", "set", value])
+    result = subprocess.check_output(["/usr/libexec/armada/controller-type", "get"], text=True, timeout=5).strip()
+    return {"value": result}
+
+
+def action_get_controller_type(request):
+    result = subprocess.check_output(["/usr/libexec/armada/controller-type", "get"], text=True, timeout=5).strip()
+    return {"value": result}
+
+
+def action_set_ssh_enabled(request):
+    enabled = bool(request.get("enabled"))
+    action = "enable" if enabled else "disable"
+    run(["/usr/bin/systemctl", action, "--now", "sshd"], timeout=30)
+    return {"enabled": ssh_enabled()}
+
+
+def action_get_ssh_enabled(request):
+    return {"enabled": ssh_enabled()}
+
+
+def action_get_device_env(request):
+    return {"env": device_env()}
+
+
+def action_inputplumber_intercept(request):
+    mode = str(request.get("mode", ""))
+    if mode not in INTERCEPT_MODES:
+        raise ValueError("invalid intercept mode")
+    run(["/usr/libexec/armada/inputplumber-intercept", mode], timeout=5)
+    return {"ok": True}
+
+
+def action_write_config(request):
+    name = str(request.get("name", ""))
+    text = request.get("text")
+    if name not in CONFIG_PATHS or not isinstance(text, str):
+        raise ValueError("invalid config write")
+    if len(text.encode("utf-8")) > MAX_REQUEST:
+        raise ValueError("config payload too large")
+    if name == "calibration":
+        params = json.loads(text)
+        rsinput = Path("/sys/module/rsinput/parameters")
+        if not rsinput.exists():
+            raise RuntimeError("controller calibration is not supported on this device")
+        for param in CALIBRATION_PARAMS:
+            if param in params:
+                (rsinput / param).write_text(str(int(params[param])), encoding="utf-8")
+        (rsinput / "update_params").write_text("1", encoding="utf-8")
+    atomic_write(CONFIG_PATHS[name], text)
+    if name == "power":
+        run(["/usr/bin/armada-power", "reload"], timeout=15)
+    return {"ok": True}
+
+
+ACTIONS = {
+    "set_controller_type": action_set_controller_type,
+    "get_controller_type": action_get_controller_type,
+    "get_device_env": action_get_device_env,
+    "get_ssh_enabled": action_get_ssh_enabled,
+    "inputplumber_intercept": action_inputplumber_intercept,
+    "set_ssh_enabled": action_set_ssh_enabled,
+    "write_config": action_write_config,
+}
+
+
+def handle(request):
+    action = ACTIONS.get(request.get("action"))
+    if action is None:
+        raise ValueError("unknown action")
+    return action(request)
+
+
+def serve_client(conn):
+    with conn:
+        conn.settimeout(CLIENT_TIMEOUT)
+        try:
+            data = b""
+            while b"\n" not in data:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > MAX_REQUEST:
+                    raise ValueError("request too large")
+            request = json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
+            response = {"ok": True, "result": handle(request)}
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        try:
+            conn.sendall((json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8"))
+        except OSError:
+            pass
+
+
+def main():
+    SOCKET.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        SOCKET.unlink()
+    except FileNotFoundError:
+        pass
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.bind(str(SOCKET))
+        # Root-only socket; config rendering still belongs to the plugin client.
+        os.chmod(SOCKET, 0o600)
+        sock.listen(8)
+        while True:
+            conn, _ = sock.accept()
+            serve_client(conn)
+
+
+if __name__ == "__main__":
+    main()

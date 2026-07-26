@@ -1,27 +1,12 @@
 import os
 import shlex
 import subprocess
-import tempfile
 from pathlib import Path
+
+from .privileged import call
 
 
 OS_VERSION_PATH = Path("/usr/lib/armada/version")
-
-
-def atomically_write(path, text, mode=None):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        if mode is not None:
-            os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
 
 
 def run_cmd(cmd, timeout=5, capture=True):
@@ -43,6 +28,12 @@ def cpu_device_class():
 
 
 def device_env():
+    try:
+        env = call("get_device_env").get("env")
+        if isinstance(env, dict):
+            return {str(k): str(v) for k, v in env.items()}
+    except Exception:
+        pass
     helper = os.environ.get("ARMADA_DEVICE_ENV", "/usr/libexec/armada/device-env")
     proc = run_cmd([helper])
     env = {}
@@ -59,7 +50,11 @@ def device_env():
 
 
 def ssh_enabled():
-    active = run_cmd(["systemctl", "is-active", "sshd"])
+    try:
+        return bool(call("get_ssh_enabled").get("enabled"))
+    except Exception:
+        pass
+    active = run_cmd(["/usr/bin/systemctl", "is-active", "sshd"])
     active_s = active.stdout.strip() if active else ""
     return active_s == "active"
 
@@ -76,6 +71,4 @@ def read_text(path):
 
 
 def set_ssh_enabled(enabled):
-    command = ["systemctl", "enable", "--now", "sshd"] if enabled else ["systemctl", "disable", "--now", "sshd"]
-    run_cmd(command, timeout=30, capture=False)
-    return ssh_enabled()
+    return bool(call("set_ssh_enabled", enabled=bool(enabled)).get("enabled"))

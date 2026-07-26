@@ -29,3 +29,13 @@ case "${ARMADA_GAMEPAD_QUIRK:-none}" in
     none)
         ;;
 esac
+
+# fake-suspend keeps wifi associated; real suspend needs NM to drop and reconnect.
+if [[ "${ARMADA_SUSPEND_MODE:-fake}" != "fake" ]]; then
+    rm -f /etc/NetworkManager/ignore-sleep
+fi
+
+# SM8550 (A740): CPU0's deep power-collapse C-state wedges the GMU; disable it.
+if [[ "${ARMADA_SOC_CLASS:-}" == "SM8550" ]]; then
+    echo 1 >/sys/devices/system/cpu/cpu0/cpuidle/state1/disable
+fi
