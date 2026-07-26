@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# armada-release-test — per-release on-device smoke test (Armada-865 SM8250).
+#
+# Run over SSH or in Konsole after an OTA/flash:
+#     /usr/libexec/armada/armada-release-test
+#
+# Any user works; privileged reads (bootc, kernel journal) use passwordless
+# sudo when available and degrade gracefully when not. Every check prints one
+# PASS/FAIL/SKIP line; a missing tool is a SKIP, never a FAIL. Exit 0 iff no
+# check FAILed — safe to gate a release script on the exit code.
+#
+# Checks: booted image identity + registry/signature consistency, container
+# sig policy, dual-copy bind-mount, audio sink + q6asm health, gamepad +
+# stick calibration, GPU presence + devcoredump, Wi-Fi MAC stability,
+# hostname, suspend routing, disk free.
+set -uo pipefail
+
+REGISTRY="${ARMADA_REGISTRY:-ghcr.io/jsbonsai/armada-865}"
+SESSION_USER="${ARMADA_SESSION_USER:-armada}"
+SESSION_UID="$(id -u "${SESSION_USER}" 2>/dev/null || echo 1000)"
+
+PASS_N=0; FAIL_N=0; SKIP_N=0
+pass() { echo "PASS: $*"; PASS_N=$((PASS_N + 1)); }
+fail() { echo "FAIL: $*"; FAIL_N=$((FAIL_N + 1)); }
+skip() { echo "SKIP: $*"; SKIP_N=$((SKIP_N + 1)); }
+info() { echo "INFO: $*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Run privileged: root directly, non-interactive sudo if it works, else try
+# unprivileged (many reads still succeed) and let the caller judge the output.
+asroot() {
+    if [ "$(id -u)" = 0 ]; then "$@"
+    elif have sudo && sudo -n true 2>/dev/null; then sudo -n "$@"
+    else "$@"
+    fi
+}
+
+# Run in the session user's PipeWire context (pactl needs the pulse socket).
+as_session() {
+    if [ "$(id -un)" = "${SESSION_USER}" ]; then
+        XDG_RUNTIME_DIR="/run/user/${SESSION_UID}" timeout 10 "$@"
+    else
+        asroot timeout 10 runuser -u "${SESSION_USER}" -- \
+            env XDG_RUNTIME_DIR="/run/user/${SESSION_UID}" "$@"
+    fi
+}
+
+# ---------------------------------------------------------------- identity --
+check_bootc() {
+    if ! have bootc; then
+        skip "bootc not installed — image identity/update-path unchecked"
+        return
+    fi
+    local json ref="" digest="" version=""
+    if ! json=$(asroot timeout 30 bootc status --format json 2>/dev/null); then
+        fail "bootc status failed (not a bootc install, or no sudo?)"
+        return
+    fi
+    if have python3; then
+        { read -r ref; read -r digest; read -r version; } < <(printf '%s' "${json}" | python3 -c '
+import json, sys
+try:
+    st = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+b = (st.get("status") or {}).get("booted") or {}
+img = b.get("image") or {}
+print(((img.get("image") or {}).get("image")) or "")
+print(img.get("imageDigest") or "")
+print(img.get("version") or "")
+') || true
+    fi
+    if [ -z "${ref}" ]; then
+        skip "could not parse bootc status JSON (python3 absent/old schema)"
+    elif [ "${ref#"${REGISTRY}"}" != "${ref}" ]; then
+        pass "booted image is ${ref} (digest ${digest:-unknown}${version:+, version ${version}})"
+    else
+        fail "booted image ${ref} is not from ${REGISTRY}"
+    fi
+    local out rc=0
+    out=$(asroot timeout 120 bootc upgrade --check 2>&1) || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        fail "bootc upgrade --check failed rc=${rc} (registry/signature/policy problem): $(printf '%s' "${out}" | tail -1)"
+    elif printf '%s' "${out}" | grep -qi 'no changes\|no update'; then
+        pass "bootc upgrade --check clean: booted digest matches the channel (up to date)"
+    else
+        info "bootc upgrade --check reports an update available — device is behind its channel"
+        pass "bootc upgrade --check succeeded (registry reachable, image acceptable to policy)"
+    fi
+}
+
+# --------------------------------------------------------------- signature --
+check_signature() {
+    local pol=/etc/containers/policy.json
+    if [ -r "${pol}" ] && grep -q sigstoreSigned "${pol}" \
+            && grep -q "${REGISTRY#ghcr.io/}" "${pol}"; then
+        pass "container policy pins sigstoreSigned for ${REGISTRY#ghcr.io/}"
+    else
+        fail "container policy missing/loose: ${pol} lacks a sigstoreSigned entry for ${REGISTRY#ghcr.io/}"
+    fi
+    if [ -s /etc/pki/containers/armada.pub ]; then
+        pass "cosign pubkey baked at /etc/pki/containers/armada.pub"
+    else
+        fail "cosign pubkey missing at /etc/pki/containers/armada.pub — OTA verification cannot work"
+    fi
+    if have rpm-ostree && have python3; then
+        local origin
+        origin=$(rpm-ostree status --booted --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)["deployments"]
+    print(d[0].get("container-image-reference", ""))
+except Exception:
+    print("")
+') || origin=""
+        case "${origin}" in
+            "")                    skip "no container-image-reference in rpm-ostree status (parse/permission)";;
+            *ostree-unverified*)   fail "booted origin is UNVERIFIED transport: ${origin}";;
+            *)                     pass "booted origin transport: ${origin}";;
+        esac
+    else
+        skip "rpm-ostree/python3 absent — origin transport unchecked"
+    fi
+}
+
+# -------------------------------------------------- dual-copy bind-mount ----
+check_bindmount() {
+    local tgt=/usr/libexec/armada/launch-steam
+    local mounted=""
+    if have findmnt; then
+        findmnt -n "${tgt}" >/dev/null 2>&1 && mounted=1
+    elif have mountpoint; then
+        mountpoint -q "${tgt}" 2>/dev/null && mounted=1
+    else
+        skip "findmnt/mountpoint absent — bind-mount state unchecked"
+        return
+    fi
+    if [ -n "${mounted}" ]; then
+        pass "dual-copy bind-mount active: /etc/armada/launch-steam over ${tgt}"
+    else
+        fail "launch-steam bind-mount NOT active — sm8250-bringup-early did not run; /etc/armada fixes are dead on this boot"
+    fi
+    if [ -f /etc/armada/launch-steam ] && [ -f "${tgt}" ]; then
+        if cmp -s /etc/armada/launch-steam "${tgt}"; then
+            pass "etc/usr launch-steam copies byte-identical"
+        else
+            fail "dual-copy drift: /etc/armada/launch-steam != ${tgt}"
+        fi
+    fi
+}
+
+# ------------------------------------------------------------------- audio --
+check_audio() {
+    if ! have pactl; then
+        skip "pactl not installed — audio sink unchecked"
+    else
+        local sinks
+        sinks=$(as_session pactl list sinks short 2>/dev/null) || sinks=""
+        if [ -z "${sinks}" ]; then
+            fail "no PipeWire sinks visible (pactl empty — audio bring-up or session bus problem)"
+        else
+            local states
+            states=$(printf '%s\n' "${sinks}" | awk '{print $NF}' | sort -u | paste -sd, -)
+            if printf '%s\n' "${sinks}" | awk '{print $NF}' | grep -qE '^(RUNNING|IDLE)$'; then
+                pass "audio sink present and alive (states: ${states})"
+            else
+                fail "sinks present but none RUNNING/IDLE (states: ${states}) — audio keepalive dead?"
+            fi
+        fi
+    fi
+    if have journalctl; then
+        local errs
+        errs=$(asroot journalctl -k -b --since '-20 min' --no-pager 2>/dev/null \
+            | grep -iE 'q6asm.*(err|fail|timeout)' | tail -3) || errs=""
+        if [ -z "${errs}" ]; then
+            pass "no q6asm errors in the kernel journal (last 20 min)"
+        else
+            fail "recent q6asm errors: $(printf '%s' "${errs}" | tail -1)"
+        fi
+    else
+        skip "journalctl absent — q6asm health unchecked"
+    fi
+}
+
+# ----------------------------------------------------------------- gamepad --
+check_gamepad() {
+    local found=""
+    if have busctl && timeout 10 busctl --system tree org.shadowblip.InputPlumber 2>/dev/null \
+            | grep -q 'CompositeDevice[0-9]'; then
+        pass "inputplumber CompositeDevice present on the system bus"
+        found=1
+    fi
+    if [ -z "${found}" ]; then
+        if grep -qiE 'retroid|gamepad|joystick' /proc/bus/input/devices 2>/dev/null; then
+            pass "gamepad present in /proc/bus/input/devices (inputplumber not answering)"
+        else
+            fail "no gamepad: inputplumber has no CompositeDevice and /proc/bus/input/devices shows none"
+        fi
+    fi
+
+    local cfg=/etc/armada/input-calibration.json params="" p
+    for p in /sys/module/retroid/parameters /sys/module/rsinput/parameters; do
+        [ -d "${p}" ] && { params="${p}"; break; }
+    done
+    if [ ! -f "${cfg}" ]; then
+        skip "no ${cfg} shipped — stick calibration not applicable"
+    elif [ -z "${params}" ]; then
+        fail "calibration config present but no retroid/rsinput module parameters in sysfs (pad driver not bound?)"
+    elif have python3; then
+        if python3 - "${cfg}" "${params}" <<'PYEOF'
+import json, sys
+from pathlib import Path
+cfg, params = Path(sys.argv[1]), Path(sys.argv[2])
+values = json.loads(cfg.read_text())
+bad = []
+for name, want in values.items():
+    node = params / name
+    if not node.exists():
+        continue
+    try:
+        got = int(node.read_text().strip())
+    except (OSError, ValueError):
+        bad.append(f"{name}=<unreadable>")
+        continue
+    if got != int(want):
+        bad.append(f"{name}={got} (want {int(want)})")
+if bad:
+    print("; ".join(bad))
+    sys.exit(1)
+PYEOF
+        then
+            pass "stick calibration applied (sysfs matches ${cfg})"
+        else
+            fail "stick calibration NOT applied — sysfs params differ from ${cfg}"
+        fi
+    else
+        pass "calibration config + module params both present (python3 absent — values not compared)"
+    fi
+}
+
+# --------------------------------------------------------------------- gpu --
+check_gpu() {
+    local renderer=""
+    if have glxinfo; then
+        renderer=$(timeout 10 glxinfo -B 2>/dev/null \
+            | sed -n 's/^.*OpenGL renderer string: //p' | head -1) || renderer=""
+    fi
+    if [ -z "${renderer}" ] && have eglinfo; then
+        renderer=$(timeout 10 eglinfo 2>/dev/null \
+            | grep -m1 -i 'renderer' | sed 's/^[^:]*: *//') || renderer=""
+    fi
+    if [ -n "${renderer}" ]; then
+        pass "GPU renderer: ${renderer}"
+    elif ls /sys/class/drm/card* >/dev/null 2>&1; then
+        pass "DRM card node present under /sys/class/drm (renderer string unavailable headless)"
+    else
+        fail "no /sys/class/drm/card* — GPU did not probe"
+    fi
+    if ls /sys/class/devcoredump/devcd*/data >/dev/null 2>&1; then
+        fail "pending devcoredump in /sys/class/devcoredump — GPU/GMU crashed recently this boot"
+    else
+        pass "no pending devcoredump"
+    fi
+    local saved
+    saved=$(ls /var/lib/armada/devcoredump/*.devcore 2>/dev/null | wc -l | tr -d ' ')
+    [ "${saved:-0}" -gt 0 ] && info "${saved} saved devcoredump(s) in /var/lib/armada/devcoredump (historic; inspect if new)"
+}
+
+# ------------------------------------------------------------------- wi-fi --
+check_wifi() {
+    if ! have nmcli; then
+        skip "nmcli absent — Wi-Fi MAC unchecked"
+        return
+    fi
+    local dev mac perm expected=/etc/armada/expected-wifi-mac
+    dev=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
+        | awk -F: '$2 == "wifi" { print $1; exit }') || dev=""
+    if [ -z "${dev}" ]; then
+        fail "NetworkManager reports no wifi device"
+        return
+    fi
+    mac=$(nmcli -g GENERAL.HWADDR device show "${dev}" 2>/dev/null | tr -d '\\' | tr 'A-F' 'a-f') || mac=""
+    if [ -z "${mac}" ]; then
+        skip "could not read MAC for ${dev} from nmcli"
+        return
+    fi
+    if [ -r "${expected}" ]; then
+        local want; want=$(tr -d ' \n' < "${expected}" | tr 'A-F' 'a-f')
+        if [ "${mac}" = "${want}" ]; then
+            pass "Wi-Fi MAC ${mac} matches ${expected}"
+        else
+            fail "Wi-Fi MAC ${mac} != expected ${want} (${expected})"
+        fi
+        return
+    fi
+    perm=$(ip -d link show dev "${dev}" 2>/dev/null \
+        | grep -o 'permaddr [0-9a-f:]*' | awk '{print $2}') || perm=""
+    if [ -n "${perm}" ] && [ "${perm}" != "${mac}" ]; then
+        fail "Wi-Fi MAC ${mac} != permanent ${perm} — randomization active; 22-wifi-mac-addr.conf not applied"
+    else
+        # Locally-administered bit set => randomized/cloned address.
+        case "${mac:1:1}" in
+            2|6|a|e) fail "Wi-Fi MAC ${mac} has the locally-administered bit set — looks randomized";;
+            *)       pass "Wi-Fi MAC ${mac} is the stable hardware address (cloned-mac-address=permanent)";;
+        esac
+    fi
+}
+
+# ---------------------------------------------------------------- hostname --
+check_hostname() {
+    local hn
+    hn=$(cat /proc/sys/kernel/hostname 2>/dev/null || hostname 2>/dev/null || echo "")
+    case "${hn}" in
+        "")                 skip "could not read hostname";;
+        fedora|localhost*)  fail "hostname is still '${hn}' — set a per-device name: hostnamectl set-hostname <name>";;
+        *)                  pass "hostname is '${hn}'";;
+    esac
+}
+
+# ----------------------------------------------------------------- suspend --
+check_suspend() {
+    if ! have systemctl; then
+        skip "systemctl absent — suspend routing unchecked"
+        return
+    fi
+    if systemctl cat systemd-suspend.service 2>/dev/null | grep -q '/usr/libexec/armada/suspend-select'; then
+        if [ -e /etc/armada/suspendmode.real ]; then
+            info "suspend mode: REAL sleep opt-in flag present (/etc/armada/suspendmode.real)"
+        else
+            info "suspend mode: fake-suspend (default; flag absent)"
+        fi
+        pass "systemd-suspend routes through /usr/libexec/armada/suspend-select"
+    else
+        fail "systemd-suspend drop-in missing — a real suspend would hang this SoC"
+    fi
+}
+
+# --------------------------------------------------------------- disk free --
+check_disk() {
+    local mnt avail_kb use_pct got=""
+    for mnt in /sysroot /var; do
+        avail_kb=""; use_pct=""
+        read -r avail_kb use_pct < <(df -Pk "${mnt}" 2>/dev/null \
+            | awk 'NR == 2 { gsub(/%/, "", $5); print $4, $5 }') || continue
+        [ -z "${avail_kb:-}" ] && continue
+        got=1
+        if [ "${use_pct}" -ge 95 ] || [ "${avail_kb}" -lt 2097152 ]; then
+            fail "${mnt}: only $((avail_kb / 1024)) MiB free (${use_pct}% used) — below the 2 GiB floor"
+        else
+            pass "${mnt}: $((avail_kb / 1024)) MiB free (${use_pct}% used)"
+        fi
+    done
+    [ -z "${got}" ] && skip "df could not stat /sysroot or /var"
+}
+
+# -------------------------------------------------------------------- main --
+model=$(tr -d '\0' </sys/firmware/devicetree/base/model 2>/dev/null || echo unknown)
+echo "== armada-release-test on '${model}' | kernel $(uname -r) | $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
+
+check_bootc
+check_signature
+check_bindmount
+check_audio
+check_gamepad
+check_gpu
+check_wifi
+check_hostname
+check_suspend
+check_disk
+
+echo "== armada-release-test: ${PASS_N} passed, ${FAIL_N} FAILED, ${SKIP_N} skipped =="
+[ "${FAIL_N}" -eq 0 ] || exit 1
+exit 0

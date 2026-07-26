@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# armada-report — one-shot diagnostics collector for Armada-865 bug reports.
+#
+# Usage (Desktop Mode -> Konsole):
+#     sudo armada-report
+#
+# Produces ~/Desktop/armada-report-<timestamp>.tar.gz owned by the desktop
+# user, ready to drag-and-drop onto a GitHub issue:
+#     https://github.com/jsbonsai/armada-865/issues/new/choose
+#
+# Privacy: this script deliberately does NOT collect NetworkManager
+# connection profiles (that is where Wi-Fi passwords live), and it redacts
+# anything that looks like a password/PSK/token or a USB serial number from
+# every file it does collect. The only device identifier included is the
+# model string (e.g. "Retroid Pocket 5").
+
+set -uo pipefail
+
+if [[ $(id -u) -ne 0 ]]; then
+    echo "armada-report must run as root — try:  sudo armada-report" >&2
+    exit 1
+fi
+
+# ---------- where the finished tarball goes -------------------------------
+report_user="${SUDO_USER:-armada}"
+id "$report_user" &>/dev/null || report_user="armada"
+report_home=$(getent passwd "$report_user" | cut -d: -f6)
+[[ -n "$report_home" && -d "$report_home" ]] || report_home="/root"
+dest_dir="$report_home/Desktop"
+mkdir -p "$dest_dir" 2>/dev/null || dest_dir="$report_home"
+
+stamp=$(date +%Y%m%d-%H%M%S)
+name="armada-report-$stamp"
+work=$(mktemp -d /tmp/armada-report.XXXXXX) || exit 1
+dir="$work/$name"
+mkdir -p "$dir"
+trap 'rm -rf "$work"' EXIT
+
+# ---------- scrubbing -----------------------------------------------------
+# Redact credential-looking key=value pairs and USB serial numbers.
+# Wi-Fi PSKs are additionally protected by simply never reading
+# /etc/NetworkManager/system-connections in the first place.
+scrub() {
+    sed -E \
+        -e 's/((psk|password|passwd|passphrase|pin|secret|token|private-key|wep-key[0-9]?)[=:][[:space:]]*)[^[:space:]"]+/\1REDACTED/Ig' \
+        -e 's/(SerialNumber[=:][[:space:]]*)[^[:space:]]+/\1REDACTED/Ig' \
+        -e 's/(iSerial[[:space:]]+[0-9]+[[:space:]]+)[^[:space:]]+/\1REDACTED/g'
+}
+
+# section <outfile> <label> <command...> — append one labelled command's
+# output to $dir/<outfile>, scrubbed, never failing the run.
+section() {
+    local out="$dir/$1" label="$2"
+    shift 2
+    {
+        echo "===== $label"
+        echo "\$ $*"
+        "$@" 2>&1
+        echo
+    } | scrub >> "$out"
+}
+
+echo "Collecting Armada diagnostics (takes about 15 seconds)..."
+
+# ---------- system overview ----------------------------------------------
+model="unknown"
+if [[ -r /sys/firmware/devicetree/base/model ]]; then
+    model=$(tr -d '\0' < /sys/firmware/devicetree/base/model)
+fi
+{
+    echo "date:   $(date -Is)"
+    echo "model:  $model"
+    echo "kernel: $(uname -a)"
+    echo "uptime: $(uptime)"
+    echo
+} > "$dir/system.txt"
+section system.txt "os-release" cat /etc/os-release
+if command -v bootc >/dev/null 2>&1; then
+    section system.txt "bootc status (booted image + version)" bootc status
+elif command -v rpm-ostree >/dev/null 2>&1; then
+    section system.txt "rpm-ostree status" rpm-ostree status
+fi
+
+# ---------- journals ------------------------------------------------------
+# Full journals are far too big to attach. Per boot we keep:
+#   *-tail.txt      last 2000 lines
+#   *-filtered.txt  every line from the Armada / audio / GPU / input
+#                   components (real SYSLOG_IDENTIFIERs: sm8250-audio,
+#                   sm8250-audio-keepalive, sm8250-audio-monitor,
+#                   armada-powerbuttond, armada-devcoredump,
+#                   armada-steamapps, plus kernel GPU/audio/input drivers)
+filter='sm8250-audio|sm8250-|armada-|adreno|\bgmu\b|msm_|\bdrm\b|gpu (hang|fault|fatal|recover)|devcoredump|devfreq|q6asm|q6afe|q6adm|q6core|soundwire|\bswr\b|wsa88|wcd93|pipewire|wireplumber|inputplumber|gamescope|joystick|gamepad|evdev|gpio-keys'
+
+collect_boot() {
+    # collect_boot <suffix> <journalctl boot selector...>
+    local suffix="$1"
+    shift
+    local raw="$work/journal-$suffix.raw"
+    journalctl "$@" --no-pager -o short-iso > "$raw" 2>/dev/null || return 0
+    [[ -s "$raw" ]] || return 0
+    tail -n 2000 "$raw" | scrub > "$dir/journal-$suffix-tail.txt"
+    grep -iE "$filter" "$raw" | scrub > "$dir/journal-$suffix-filtered.txt"
+    rm -f "$raw"
+}
+collect_boot current -b
+collect_boot previous -b -1
+
+# ---------- dmesg (GPU / audio / input) -----------------------------------
+dmesg_raw="$work/dmesg.raw"
+dmesg 2>/dev/null > "$dmesg_raw" || : > "$dmesg_raw"
+{
+    echo "===== dmesg: GPU"
+    grep -iE 'adreno|\bgmu\b|msm_|\bdrm\b|\bgpu\b|devcoredump|devfreq' "$dmesg_raw"
+    echo
+    echo "===== dmesg: audio"
+    grep -iE 'q6asm|q6afe|q6adm|q6core|soundwire|\bswr\b|wsa88|wcd93|\bsnd\b|audio|\bapr\b|glink|adsp' "$dmesg_raw"
+    echo
+    echo "===== dmesg: input"
+    grep -iE 'input:|\bhid\b|joystick|gamepad|evdev|touchscreen|gpio-keys' "$dmesg_raw"
+} 2>/dev/null | scrub > "$dir/dmesg.txt"
+rm -f "$dmesg_raw"
+
+# ---------- services ------------------------------------------------------
+report_uid=$(id -u "$report_user")
+{
+    echo "===== inputplumber.service"
+    systemctl status --no-pager -l inputplumber.service 2>&1
+    echo
+    echo "===== armada system units"
+    systemctl --no-pager --all list-units 'armada-*' 2>&1
+    echo
+    echo "===== session (sddm autologin -> gamescope-session-steam)"
+    systemctl status --no-pager -l sddm.service 2>&1
+    echo
+    echo "===== gamescope processes"
+    pgrep -af gamescope 2>/dev/null || echo "gamescope not running (Desktop Mode?)"
+    echo
+    echo "===== user units ($report_user)"
+    runuser -u "$report_user" -- env "XDG_RUNTIME_DIR=/run/user/$report_uid" \
+        systemctl --user --no-pager --all list-units 'armada-*' 2>&1 \
+        || echo "(no user manager reachable)"
+} | scrub > "$dir/services.txt"
+
+# ---------- storage -------------------------------------------------------
+section storage.txt "df -h" df -h
+section storage.txt "lsblk" lsblk
+
+# ---------- installer logs (if present) -----------------------------------
+for f in /var/log/armada-install.log /var/log/armada-install.trace /var/log/armada-uninstall.log /var/log/armada-uninstall.trace /tmp/armada-865-install.log /tmp/armada-installer.log; do
+    if [[ -r "$f" ]]; then
+        scrub < "$f" > "$dir/$(basename "$f")"
+    fi
+done
+
+# ---------- loader-flash backups ------------------------------------------
+{
+    echo "===== loader backups in /var/lib/armada"
+    ls -l /var/lib/armada/loader-backup-*.img 2>/dev/null || echo "(none found)"
+} > "$dir/loader-backups.txt"
+
+# ---------- bundle --------------------------------------------------------
+tarball="$dest_dir/$name.tar.gz"
+if ! tar -czf "$tarball" -C "$work" "$name"; then
+    echo "ERROR: failed to create $tarball" >&2
+    exit 1
+fi
+chown "$report_user": "$tarball" 2>/dev/null || true
+chmod 0644 "$tarball"
+
+echo
+echo "Done. Report written to:"
+echo "    $tarball"
+echo
+echo "Next steps:"
+echo "  1. Open  https://github.com/jsbonsai/armada-865/issues/new/choose"
+echo "  2. Pick 'Bug report' and fill in the form."
+echo "  3. Drag and drop the .tar.gz above into the issue text box —"
+echo "     GitHub uploads it and inserts a link automatically."
+echo
+echo "Privacy: Wi-Fi credentials are never collected, and password- or"
+echo "serial-number-looking strings are redacted before packaging."

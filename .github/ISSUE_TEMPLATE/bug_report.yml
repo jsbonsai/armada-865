@@ -1,0 +1,84 @@
+name: Bug report
+description: Something broke on your Armada-865 handheld
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! A filled-in form plus an
+        `armada-report` bundle is usually enough to fix an issue without any
+        back-and-forth.
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options:
+        - Retroid Pocket 5
+        - Retroid Pocket Flip 2
+        - Retroid Pocket Mini V2
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Armada version
+      description: >-
+        Game Mode → Settings → System, or run `bootc status` in a Desktop Mode
+        Konsole (the booted image version).
+      placeholder: "e.g. v0.2.3 / sm8250.20260725.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: Running from
+      options:
+        - microSD card
+        - Internal storage
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, and what went wrong? Steps to reproduce help a lot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+
+  - type: input
+    id: game
+    attributes:
+      label: Game (if relevant)
+      placeholder: "e.g. Devil May Cry 4"
+
+  - type: checkboxes
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >-
+        In Desktop Mode, open Konsole and run `sudo armada-report`
+        (password: `armada` unless you changed it). It writes
+        `armada-report-<date>.tar.gz` to your Desktop. Wi-Fi passwords are
+        never collected and secret-looking strings are redacted.
+      options:
+        - label: I ran `sudo armada-report` and attached the tar.gz below
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: armada-report bundle / extra logs
+      description: >-
+        Drag and drop the `armada-report-<date>.tar.gz` from your Desktop into
+        this box — GitHub uploads it and inserts a link automatically. Paste
+        any other relevant output here too.

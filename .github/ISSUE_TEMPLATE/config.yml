@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup guide
+    url: https://github.com/jsbonsai/armada-865/blob/sm8250/docs/setup-guide.md
+    about: Flashing, first boot, credentials, and known issues — check here before filing a bug.
