@@ -85,6 +85,30 @@ fi
 sudo sync
 sudo umount "${WORK}/mnt"
 
+# ostree must NOT manage the bootloader: at OTA finalize grub2-mkconfig dies on
+# the composefs root and the staged deployment is dropped (device boots the old
+# build). armada-grub-efi-update owns the ESP grub.cfg; bootloader=none still
+# writes the BLS entries it consumes. Edit the repo config directly (GKeyFile
+# ini) so the CI host doesn't need the ostree CLI.
+ROOTP="${LOOP}p3"
+mkdir -p "${WORK}/rootmnt"
+sudo mount "${ROOTP}" "${WORK}/rootmnt"
+OSTREE_CFG=$(sudo find "${WORK}/rootmnt" -maxdepth 4 -path '*/ostree/repo/config' | head -1)
+[ -n "${OSTREE_CFG}" ] || { echo "ERROR: ostree repo config not found on ${ROOTP}"; exit 1; }
+sudo python3 - "${OSTREE_CFG}" <<'PYEOF'
+import configparser, sys
+p = sys.argv[1]
+c = configparser.ConfigParser()
+c.read(p)
+if not c.has_section('sysroot'):
+    c.add_section('sysroot')
+c.set('sysroot', 'bootloader', 'none')
+with open(p, 'w') as f:
+    c.write(f, space_around_delimiters=False)
+PYEOF
+sudo grep -A3 '^\[sysroot\]' "${OSTREE_CFG}"
+sudo umount "${WORK}/rootmnt"
+
 # Android shows this label when copying the ABL
 sudo fatlabel "${ESP}" ARMADA
 

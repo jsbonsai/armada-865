@@ -508,6 +508,13 @@ deploy_root() {
     step "Initialising the ostree sysroot"
     ostree admin init-fs --modern "$TARGET"
     ostree admin os-init --sysroot="$TARGET" default
+    # ostree must NOT manage the bootloader: at OTA finalize it runs
+    # grub2-mkconfig, which dies on the composefs root ("failed to get canonical
+    # path of 'composefs'") and the staged deployment is dropped — the device
+    # silently boots the old build. armada-grub-efi-update owns the ESP instead;
+    # 'none' still writes the BLS entries it reads. (Bit us on the rp5's first
+    # internal OTA, 2026-07-25.)
+    ostree config --repo="$TARGET/ostree/repo" set sysroot.bootloader none
 
     commit=$(ostree admin status --json | jq -r '.deployments[]|select(.booted)|.checksum' | head -n1)
     [[ -n $commit && $commit != null ]] || die "could not determine booted ostree commit"
