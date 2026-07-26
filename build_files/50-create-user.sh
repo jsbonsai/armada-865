@@ -32,5 +32,7 @@ cat > /etc/sudoers.d/armada-user <<'EOF'
 %wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/session-control switch-gamemode
 %wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/session-control default-gamemode
 %wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/armada-installer *
+%wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/armada-865-install-internal *
+%wheel ALL=(ALL) NOPASSWD: /usr/libexec/armada/armada-865-uninstall-internal *
 EOF
 chmod 0440 /etc/sudoers.d/armada-user

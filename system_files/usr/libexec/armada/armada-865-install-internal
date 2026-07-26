@@ -60,6 +60,8 @@ SD_ESP="/boot/efi"          # the running SD's mounted ESP (staging source)
 destructive=0
 TARGET=""
 INHIBIT_PID=""
+OVERWRITE=0
+REINSTALL=0
 
 usage() {
     cat >&2 <<EOF
@@ -73,10 +75,17 @@ Storage split (choose at most one; default: Android ~20 GiB, Armada the rest):
   --armada-size GB      size to give Armada (Android keeps the rest)
 
 Other options:
+  --overwrite           reinstall into an EXISTING internal Armada install:
+                        reformats ARMADA_ESP/ARMADA_ROOT in place (wipes internal
+                        Armada incl. games) — Android and the GPT are untouched
   --device /dev/sdX     internal disk (default: autodetected = ${DEVICE:-<none>})
   --gpt-backup PATH     where to write the GPT backup (default: /root/…)
   -y, --yes             skip the confirmation prompt
   -h, --help            this help
+
+Subcommands:
+  gui                   desktop (zenity) front-end — install, reinstall, remove
+  detect                read-only probe: print mode + sizes (k=v), for the GUI
 EOF
     exit "${1:-2}"
 }
@@ -92,7 +101,16 @@ cleanup() {
     [[ -n "$INHIBIT_PID" ]] && kill "$INHIBIT_PID" 2>/dev/null || true
     [[ -n "$TARGET" ]] && { umount -R "$TARGET" 2>/dev/null || true; rmdir "$TARGET" 2>/dev/null || true; }
     if (( rc != 0 && destructive == 1 )); then
-        cat >&2 <<EOF
+        if (( REINSTALL )); then
+            cat >&2 <<EOF
+
+ERROR: reinstall did not finish. Android and the partition table are untouched;
+  only the internal Armada ESP/ROOT contents may be incomplete. Do NOT rely on
+  internal boot yet. Recover: boot the SD (untouched) and re-run:
+    armada-865-install-internal --overwrite
+EOF
+        else
+            cat >&2 <<EOF
 
 ERROR: install did not finish after internal storage was modified.
   Android was factory-reset but is otherwise intact; the internal ESP/ROOT may be
@@ -101,6 +119,7 @@ ERROR: install did not finish after internal storage was modified.
   installer. To fully back out, restore the GPT backup:
     sgdisk --load-backup=${GPT_BACKUP:-<backup>} ${DEVICE}
 EOF
+        fi
     fi
     exit $rc
 }
@@ -178,15 +197,31 @@ list_partitions() {
         | @tsv'
 }
 
-# Refuse if an existing Armada/ROCKNIX install is present (avoid double-install).
+# Existing-install detection. A clean ARMADA_ESP+ARMADA_ROOT pair can be
+# reinstalled in place with --overwrite (reformat + redeploy; GPT and Android
+# untouched). Anything else (foreign or partial layouts) must be removed first.
 detect_existing() {
-    local num s e name
+    local num s e name esp_num="" root_num="" foreign=""
     while IFS=$'\t' read -r num s e name; do
         case "$name" in
-            ARMADA_ESP|ARMADA_ROOT|ARMADA_BOOT|ROCKNIX|STORAGE)
-                die "found existing '$name' (partition #$num) on $DEVICE — an internal install already exists. Remove it first with: armada-865-uninstall-internal --keep-free  (then re-run), or undo entirely with: armada-865-uninstall-internal" ;;
+            ARMADA_ESP)  esp_num=$num ;;
+            ARMADA_ROOT) root_num=$num ;;
+            ARMADA_BOOT|ROCKNIX|STORAGE) foreign=$name ;;
         esac
     done < <(list_partitions)
+    [[ -n $foreign ]] && die "found existing '$foreign' on $DEVICE — unrecognized Linux layout; this tool only reinstalls over layouts it created. Remove it first."
+    if [[ -n $esp_num && -n $root_num ]]; then
+        (( OVERWRITE )) || die "an internal Armada install already exists on $DEVICE.
+  Reinstall over it (wipes internal Armada incl. games; Android untouched):  re-run with --overwrite
+  Change the storage split: armada-865-uninstall-internal --keep-free, then re-run
+  Undo entirely (give storage back to Android): armada-865-uninstall-internal"
+        REINSTALL=1
+        ESP_PART=$(part_node "$DEVICE" "$esp_num")
+        ROOT_PART=$(part_node "$DEVICE" "$root_num")
+        [[ -b $ESP_PART && -b $ROOT_PART ]] || die "existing ARMADA partitions not visible as block devices"
+    elif [[ -n $esp_num || -n $root_num ]]; then
+        die "found a partial Armada layout on $DEVICE (only one of ARMADA_ESP/ARMADA_ROOT) — remove it first with: armada-865-uninstall-internal"
+    fi
 }
 
 find_userdata() {
@@ -514,6 +549,7 @@ parse_args() {
             --device=*) DEVICE="${1#*=}" ;;
             --gpt-backup) GPT_BACKUP="${2:-}"; shift ;;
             --gpt-backup=*) GPT_BACKUP="${1#*=}" ;;
+            --overwrite) OVERWRITE=1 ;;
             -y|--yes) ASSUME_YES=1 ;;
             -h|--help) usage 0 ;;
             *) echo "ERROR: unknown argument: $1" >&2; usage ;;
@@ -530,6 +566,36 @@ main() {
     refuse_self
     check_sd_esp
     detect_existing
+
+    if (( REINSTALL )); then
+        local esp_gib root_gib
+        esp_gib=$(( $(blockdev --getsize64 "$ESP_PART") / 1073741824 ))
+        root_gib=$(( $(blockdev --getsize64 "$ROOT_PART") / 1073741824 ))
+        cat <<EOF
+
+Reinstall plan for ${DEVICE} (existing partitions reused, GPT untouched):
+  ARMADA_ESP  ($ESP_PART): reformat FAT32 (${esp_gib} GiB) and restage
+  ARMADA_ROOT ($ROOT_PART): WIPED and redeployed (~${root_gib} GiB btrfs)
+    — everything on internal Armada is lost, including installed games/saves.
+  Android is NOT touched (no factory reset). The SD card is not modified.
+
+EOF
+        confirm "Proceed with the reinstall (wipes internal Armada)?" || { echo "Aborted."; exit 0; }
+        trap cleanup EXIT
+        inhibit_sleep
+        destructive=1
+        step "Staging ARMADA_ESP from the SD payload (reformat, no flash)"
+        stage_esp
+        deploy_root
+        cat <<EOF
+
+Reinstall complete.
+  Power off, remove the SD card, then power on. Hold Vol+ through the Android
+  splash to reach the internal GRUB menu.
+
+EOF
+        return 0
+    fi
 
     find_userdata
     require_userdata_last
@@ -574,4 +640,163 @@ Install complete.
 EOF
 }
 
-main "$@"
+# ---- read-only probe (k=v output; consumed by the GUI) ----------------------
+cmd_detect() {
+    need_root
+    check_device
+    local num s e name esp_num="" root_num="" foreign=""
+    local esp_bytes=0 root_bytes=0 ud_bytes=0
+    while IFS=$'\t' read -r num s e name; do
+        case "$name" in
+            ARMADA_ESP)  esp_num=$num;  esp_bytes=$(( e - s + 1 )) ;;
+            ARMADA_ROOT) root_num=$num; root_bytes=$(( e - s + 1 )) ;;
+            ARMADA_BOOT|ROCKNIX|STORAGE) foreign=$name ;;
+            userdata) ud_bytes=$(( e - s + 1 )) ;;
+        esac
+    done < <(list_partitions)
+    echo "device=$DEVICE"
+    if [[ -n $foreign ]]; then
+        echo "mode=foreign"; echo "name=$foreign"; return 0
+    fi
+    if [[ -n $esp_num && -n $root_num ]]; then
+        echo "mode=occupied"
+        echo "installed=armada"
+        echo "android_gib=$(( ud_bytes / 1073741824 ))"
+        echo "linux_gib=$(( (esp_bytes + root_bytes) / 1073741824 ))"
+        return 0
+    fi
+    if [[ -n $esp_num || -n $root_num ]]; then
+        echo "mode=foreign"; echo "name=partial-armada-layout"; return 0
+    fi
+    find_userdata
+    ( require_userdata_last ) >/dev/null 2>&1 || { echo "mode=foreign"; echo "name=post-userdata-partition"; return 0; }
+    local window_mib min_mib max_mib
+    window_mib=$(( DISK_END_MIB - UD_START_MIB ))
+    min_mib=$ANDROID_MIN_MIB
+    max_mib=$(( window_mib - ESP_MIB - ROOT_MIN_MIB - 8 ))
+    if (( max_mib < min_mib )); then
+        echo "mode=toosmall"
+        echo "needed_gib=$(( (ANDROID_MIN_MIB + ESP_MIB + ROOT_MIN_MIB) / 1024 ))"
+        return 0
+    fi
+    echo "mode=fresh"
+    echo "android_current_gib=$UD_ORIG_GIB"
+    echo "android_min_gib=$(( min_mib / 1024 ))"
+    echo "android_max_gib=$(( max_mib / 1024 ))"
+}
+
+# ---- desktop GUI (zenity; mirrors upstream armada-installer's UX) ------------
+SELF=$(realpath "${BASH_SOURCE[0]}")
+UNINSTALLER=/usr/libexec/armada/armada-865-uninstall-internal
+
+esc() {
+    local s="$1"
+    s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"
+    printf '%s' "$s"
+}
+
+gui_die() {
+    zenity --error --title="$GUI_TITLE" --width=460 --text="$1" >/dev/null 2>&1
+    exit 1
+}
+
+# Heartbeat drives the dialog (installer output is too sparse to); wait gives
+# the true exit code. $@ is the full privileged command (sudoers NOPASSWD).
+gui_run() {
+    local text="$1" pid; shift
+    sudo "$@" >"$GUI_LOG" 2>&1 &
+    pid=$!
+    ( while kill -0 "$pid" 2>/dev/null; do printf '\n'; sleep 1; done ) \
+        | zenity --progress --pulsate --auto-close --no-cancel \
+            --title="$GUI_TITLE" --width=480 --text="$text" >/dev/null 2>&1
+    wait "$pid"
+}
+
+gui_offer_poweroff() {
+    zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=460 --no-wrap \
+        --ok-label="Power off" --cancel-label="Close" --text="$1" \
+        && sudo systemctl poweroff || true
+}
+
+gui_install_flow() {
+    local info="$1" amin amax acur default_android android
+    amin=$(sed -n 's/^android_min_gib=//p' <<<"$info")
+    amax=$(sed -n 's/^android_max_gib=//p' <<<"$info")
+    acur=$(sed -n 's/^android_current_gib=//p' <<<"$info")
+
+    zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=480 --no-wrap \
+        --ok-label="Continue" --cancel-label="Cancel" \
+        --text="<b>Install Armada alongside Android?</b>\n\nThis <b>factory-resets Android</b>: you lose installed Android apps and data\n(the Android system itself is kept). Your SD card is not touched.\n\nNo bootloader is flashed — a failed install is recovered by booting the SD\nagain and re-running this installer." \
+        || exit 0
+
+    default_android=$amin
+    (( amax >= 20 )) && default_android=20
+    android=$(zenity --scale --title="$GUI_TITLE" --icon="$GUI_ICON" \
+        --text="<b>Choose Android's size</b>\n\nThe slider sets Android's storage in GB.\nArmada gets the rest.\n\nCurrent Android: <b>${acur} GB</b>." \
+        --min-value="$amin" --max-value="$amax" --value="$default_android" --step=4) \
+        || exit 0
+
+    zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=480 --no-wrap \
+        --ok-label="Install" --cancel-label="Cancel" \
+        --text="<b>Ready to install</b>\n\nAndroid:  <b>${android} GB</b>\nArmada:  <b>~$(( amax + ROOT_MIN_MIB / 1024 - android )) GB</b>\n\nResizing Android <b>factory-resets it</b>: installed Android apps and data are lost\n(the Android system is kept)." \
+        || exit 0
+
+    gui_run "Installing Armada, do not power off…" "$SELF" --yes --android-size "$android" \
+        || gui_die "Install failed (details in ${GUI_LOG}).\n\nBoot the SD again and re-run this installer to recover."
+    gui_offer_poweroff "<b>Install complete.</b>\n\nPower off, remove the SD card, then power on holding <b>Vol+</b>."
+}
+
+gui_manage_flow() {
+    local info="$1" android linux out rc
+    android=$(sed -n 's/^android_gib=//p' <<<"$info")
+    linux=$(sed -n 's/^linux_gib=//p' <<<"$info")
+
+    out=$(zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=540 --no-wrap \
+        --ok-label="Reinstall Armada" --extra-button="Remove & Restore Android" --cancel-label="Cancel" \
+        --text="<b>Armada is already installed on internal storage.</b>\n\nAndroid:  <b>${android} GB</b>\nArmada:  <b>${linux} GB</b>\n\n<b>Reinstall Armada</b> replaces the internal Armada with this SD's version.\nAndroid is untouched, but internal Armada's <b>games and saves are wiped</b>.\n\n<b>Remove &amp; Restore Android</b> erases Armada and gives the disk back to Android.") && rc=0 || rc=$?
+
+    if (( rc == 0 )); then
+        zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=480 --no-wrap \
+            --ok-label="Reinstall" --cancel-label="Cancel" \
+            --text="<b>Reinstall Armada?</b>\n\nInternal Armada — including installed games and saves — is <b>wiped</b>\nand replaced with this SD's version.\n\nAndroid and the partition layout are untouched." \
+            || exit 0
+        gui_run "Reinstalling Armada, do not power off…" "$SELF" --yes --overwrite \
+            || gui_die "Reinstall failed (details in ${GUI_LOG}).\n\nAndroid is untouched. Boot the SD again and retry."
+        gui_offer_poweroff "<b>Reinstall complete.</b> Android is unchanged.\n\nPower off, remove the SD card, then power on holding <b>Vol+</b>."
+    elif [[ "$out" == "Remove & Restore Android" ]]; then
+        zenity --question --title="$GUI_TITLE" --icon="$GUI_ICON" --width=500 --no-wrap \
+            --ok-label="Remove" --cancel-label="Cancel" \
+            --text="<b>Remove Armada and give all storage back to Android?</b>\n\nThis ERASES internal Armada and factory-resets Android.\n<b>It can't be undone.</b>" \
+            || exit 0
+        gui_run "Removing Armada, do not power off…" "$UNINSTALLER" --yes --reclaim \
+            || gui_die "Remove failed (details in ${GUI_LOG})."
+        gui_offer_poweroff "<b>Armada removed.</b> Android has the full internal disk again.\n\nPower off and remove the SD card to boot Android, or relaunch to install Armada."
+    fi
+}
+
+cmd_gui() {
+    GUI_TITLE="Armada Installer"
+    GUI_ICON="drive-harddisk"
+    GUI_LOG=/tmp/armada-865-install.log
+    command -v zenity >/dev/null 2>&1 || { echo "zenity not installed" >&2; exit 1; }
+
+    local info gmode
+    info=$(sudo "$SELF" detect 2>/dev/null) || gui_die "Couldn't inspect internal storage."
+    gmode=$(sed -n 's/^mode=//p' <<<"$info")
+    case "$gmode" in
+        fresh)    gui_install_flow "$info" ;;
+        occupied) gui_manage_flow "$info" ;;
+        toosmall)
+            local need
+            need=$(sed -n 's/^needed_gib=//p' <<<"$info")
+            gui_die "Internal storage is too small to install Armada.\n\nArmada needs about ${need} GB free on internal storage." ;;
+        foreign)  gui_die "Internal storage has an unrecognized Linux layout.\n\nThis tool only manages installs it created." ;;
+        *)        gui_die "Unexpected internal-storage state: ${gmode:-unknown}." ;;
+    esac
+}
+
+case "${1:-}" in
+    gui)    shift; cmd_gui "$@" ;;
+    detect) shift; cmd_detect "$@" ;;
+    *)      main "$@" ;;
+esac
