@@ -17,7 +17,11 @@ on:
 env:
   IMAGE_NAME: ${{ github.event.repository.name }}
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
-  BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder:latest"
+  # Pinned by digest, not :latest — floating external pins are our #1 CI
+  # breakage class (Terra GPG, steamrt, abl, u-boot...). This is
+  # bootc-image-builder :latest as of 2026-06-18; bump deliberately by
+  # re-resolving the digest and updating the date in this comment.
+  BIB_IMAGE: "quay.io/centos-bootc/bootc-image-builder@sha256:2b52843ea2bfda73b0a08d97e76b734393b1d3a804681b9fabb26723bd3a2f0b"
   ARMADA_GRUB_BOOT: "1"
 
 concurrency:
@@ -87,6 +91,8 @@ jobs:
             output/armada-*.img.gz
             output/armada-*.img.gz.sha256
           if-no-files-found: error
-          retention-days: 1
+          # 3 days (was 1): artifact storage is free on public repos, and the
+          # 1-day expiry kept turning "release tomorrow" into a full rebuild.
+          retention-days: 3
           compression-level: 0
           overwrite: true

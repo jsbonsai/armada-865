@@ -3,10 +3,16 @@ name: Build container image
 on:
   pull_request:
     branches:
+      # sm8250 is the default branch — without it here, PRs targeting the trunk
+      # (e.g. dependabot) got no CI at all. main kept for upstream-sync PRs.
       - main
+      - sm8250
   push:
     branches:
-      - main
+      # main removed: it is only an upstream-sync staging branch, and its pushes
+      # can never publish (the push step gates on default-branch/sm8250) — each
+      # one just burned a ~25 min ARM build. Validate sync branches by
+      # dispatching this workflow on them instead (validation mode below).
       - sm8250
     paths-ignore:
       # Docs, release notes, and workflow edits don't change the image — skip the
@@ -16,18 +22,31 @@ on:
       - 'docs/**'
       - '.github/**'
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build. Leave empty to use the workflow ref."
+        type: string
+        default: ""
 
 env:
   IMAGE_DESC: "Armada: a gaming-focused, SteamOS-like Fedora bootc image for ARM64 handhelds"
   IMAGE_NAME: "${{ github.event.repository.name }}"
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
-  # Every merge to main publishes the "testing" channel; beta/stable are made by
+  # Every push to sm8250 publishes the "testing" channel; beta/stable are made by
   # promoting (retagging) a testing build via promote.yml — no rebuild.
   DEFAULT_TAG: "testing"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-${{ inputs.brand_name}}-${{ inputs.stream_name }}
-  cancel-in-progress: false
+  # inputs.branch keeps manual branch builds out of the push group (empty on
+  # push/PR events, so those group purely by ref as before). Stale
+  # brand_name/stream_name inputs (ublue template residue) removed.
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-${{ inputs.branch }}
+  # Cancel superseded runs on push only: each push re-pushes AND re-signs the
+  # same :testing tag, so a run cancelled between "pushed" and "signed" is
+  # healed by the run that replaced it (devices merely refuse the briefly
+  # unsigned image and retry — bootc fails closed). Manual dispatches and PRs
+  # are never cancelled.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   build_push:
@@ -50,6 +69,25 @@ jobs:
           echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
           echo "IMAGE_NAME=${IMAGE_NAME,,}" >> ${GITHUB_ENV}
 
+      - name: Resolve manual build ref
+        id: manual
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INPUT_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          branch="${INPUT_BRANCH}"
+          if [ -z "${branch}" ]; then
+            exit 0
+          fi
+          branch="${branch#refs/heads/}"
+          if ! [[ "${branch}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Branch '${branch}' cannot be used as a matching container tag. Use letters, numbers, dots, underscores, or dashes."
+            exit 1
+          fi
+
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+
       - name: Ensure container tools
         run: |
           set -euxo pipefail
@@ -62,7 +100,14 @@ jobs:
           [ -z "$need" ] || { sudo apt-get update && sudo apt-get install -y $need; }
 
       - name: Require signing key before publishing a channel
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        # Must mirror the Push step's condition exactly: fail early ONLY when
+        # this run will actually publish. A validation dispatch on a
+        # non-publishing ref (or a fork without the secret) must sail past this
+        # and finish green.
+        if: >-
+          github.event_name != 'pull_request' &&
+          (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+           github.ref == 'refs/heads/sm8250')
         run: |
           if [ -z "${{ secrets.SIGNING_SECRET }}" ]; then
             echo "::error::SIGNING_SECRET is not set — refusing to publish an unsigned image (devices verify ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }})."
@@ -71,6 +116,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.manual.outputs.branch || github.ref }}
 
       - name: Check build recipes
         uses: ublue-os/just-action@30ab4659369934b65b655bf8d2fa4ddd6547d384 # v3
@@ -82,11 +129,13 @@ jobs:
           echo "version=$(TZ=America/New_York date +%Y%m%d).$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Image Metadata
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: metadata
         with:
+          # Manual branch builds tag as :<branch> so they never touch the
+          # :testing OTA channel; normal pushes keep publishing :testing.
           tags: |
-            type=raw,value=${{ env.DEFAULT_TAG }}
+            type=raw,value=${{ steps.manual.outputs.branch || env.DEFAULT_TAG }}
             type=sha,enable=${{ github.event_name == 'pull_request' }}
             type=ref,event=pr
           labels: |
@@ -164,16 +213,23 @@ jobs:
           digest=$(sudo skopeo inspect --format '{{.Digest}}' "docker://${IMAGE_FULL}:${first}")
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
 
+      # Sign gating (and Install Cosign below) keys off the ONE fact that
+      # matters — "did the Push step actually produce a digest?" — instead of
+      # re-deriving ref conditions by hand. This is what fixes the
+      # validation-build failure (run 30196668732): a branch copy of this file
+      # once dropped the ref gate from Sign but not Push, so cosign was handed
+      # 'ghcr.io/...@' (empty digest). With the digest gate the two steps can
+      # never disagree, on any ref, in any future branch copy.
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.HAVE_SIGNING_SECRET == 'true'
+        if: steps.push.outputs.digest != '' && env.HAVE_SIGNING_SECRET == 'true'
         env:
           HAVE_SIGNING_SECRET: ${{ secrets.SIGNING_SECRET != '' }}
         with:
           cosign-release: 'v2.6.3'
 
       - name: Sign container image
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && env.HAVE_SIGNING_SECRET == 'true'
+        if: steps.push.outputs.digest != '' && env.HAVE_SIGNING_SECRET == 'true'
         run: |
           IMAGE_FULL="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}"
           # cosign runs rootless and has its own auth store — the push step's
@@ -185,9 +241,22 @@ jobs:
           cosign sign -y --new-bundle-format=false --key env://COSIGN_PRIVATE_KEY "${IMAGE_FULL}@${{ steps.push.outputs.digest }}"
         env:
           HAVE_SIGNING_SECRET: ${{ secrets.SIGNING_SECRET != '' }}
-          TAGS: ${{ steps.push.outputs.digest }}
           COSIGN_EXPERIMENTAL: false
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
           # Key is encrypted with an empty passphrase; without this cosign
           # prompts on a TTY-less runner and the step hangs/fails.
           COSIGN_PASSWORD: ""
+
+      - name: Validation-only summary
+        # No digest ⇒ nothing was published (PR, or a dispatch on a
+        # non-publishing ref). Say so loudly so a green validation run is never
+        # mistaken for an OTA publish.
+        if: steps.push.outputs.digest == ''
+        run: |
+          {
+            echo "### Validation build — not published"
+            echo ""
+            echo "Image built and rechunked successfully on \`${GITHUB_REF}\`,"
+            echo "but push/sign were skipped: only pushes to the default branch"
+            echo "or \`sm8250\` publish the \`:${DEFAULT_TAG}\` OTA channel."
+          } >> "$GITHUB_STEP_SUMMARY"

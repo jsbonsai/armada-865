@@ -1,0 +1,94 @@
+---
+name: Upstream drift check
+# Passive weekly visibility into how far sm8250 has drifted behind upstream
+# (virtudude/armada). Read-only: it never opens PRs and never triggers builds —
+# syncing stays a deliberate, maintainer-driven step.
+#
+# Cost note: one API call on ubuntu-latest, ~30 s/week, zero ARM minutes —
+# negligible even if Actions ever bills this repo.
+
+on:
+  schedule:
+    # Mondays 09:17 UTC (off the :00 rush — GitHub delays/drops on-the-hour crons).
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_OWNER: virtudude
+  UPSTREAM_BRANCH: main
+
+jobs:
+  drift:
+    name: Compare against upstream
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Compute commits behind upstream
+        id: drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Fork-network compare API: base = our default branch, head = the
+          # upstream parent's branch. ahead_by = commits upstream has that we
+          # don't = our drift. No checkout/clone needed.
+          behind=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${UPSTREAM_OWNER}:${UPSTREAM_BRANCH}" \
+            --jq '.ahead_by')
+          echo "behind=${behind}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Upstream drift"
+            echo ""
+            echo "\`${GITHUB_REF_NAME}\` is **${behind}** commit(s) behind" \
+                 "\`${UPSTREAM_OWNER}/armada\` \`${UPSTREAM_BRANCH}\`."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Update pinned drift issue (only when the count changes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEHIND: ${{ steps.drift.outputs.behind }}
+        run: |
+          set -euo pipefail
+          # One self-updating labeled issue, edited only when the number moves —
+          # no weekly issue spam, no notification noise on "still the same".
+          gh label create upstream-drift \
+            --repo "${GITHUB_REPOSITORY}" \
+            --description "Auto-updated upstream drift tracker" \
+            --color 5319e7 2>/dev/null || true
+
+          title="Upstream drift: ${BEHIND} commits behind ${UPSTREAM_OWNER}/armada ${UPSTREAM_BRANCH}"
+          body_file=$(mktemp)
+          cat > "${body_file}" <<EOF
+          Auto-updated weekly by \`.github/workflows/upstream-drift.yml\`.
+
+          \`${GITHUB_REF_NAME}\` is currently **${BEHIND}** commit(s) behind [\`${UPSTREAM_OWNER}/armada\`](https://github.com/${UPSTREAM_OWNER}/armada/tree/${UPSTREAM_BRANCH}) \`${UPSTREAM_BRANCH}\`.
+
+          Syncing is done deliberately by the maintainer — this workflow only watches.
+
+          _Last checked: $(date -u +%Y-%m-%d)_ — leave this issue open; closing it just makes the next run recreate it.
+          EOF
+
+          num=$(gh issue list --repo "${GITHUB_REPOSITORY}" \
+                  --label upstream-drift --state open \
+                  --json number --jq '.[0].number // empty')
+          if [ -z "${num}" ]; then
+            gh issue create --repo "${GITHUB_REPOSITORY}" \
+              --title "${title}" --body-file "${body_file}" --label upstream-drift
+          else
+            current=$(gh issue view "${num}" --repo "${GITHUB_REPOSITORY}" \
+                        --json title --jq '.title')
+            if [ "${current}" != "${title}" ]; then
+              gh issue edit "${num}" --repo "${GITHUB_REPOSITORY}" \
+                --title "${title}" --body-file "${body_file}"
+            else
+              echo "Drift unchanged (${BEHIND}); issue #${num} left untouched."
+            fi
+          fi
