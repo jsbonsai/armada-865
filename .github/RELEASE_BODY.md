@@ -1,4 +1,4 @@
-# Armada-865 v0.2.2-beta
+# Armada-865 v0.2.3-beta
 
 A SteamOS-like experience on Snapdragon 865 (SM8250) Retroid handhelds. See the
 [README](../../tree/sm8250#readme) for the full story, what works, and how this
@@ -10,7 +10,18 @@ fork differs from upstream Armada.
 
 ---
 
-## ✨ What's new in v0.2.2-beta
+## ✨ What's new in v0.2.3-beta
+
+- **Graphical internal-storage installer** — boot the SD, open Desktop Mode, and
+  the **Armada Installer** app installs Armada to internal storage with a big
+  Android-size slider — or detects an existing install and offers
+  **Reinstall** / **Remove & Restore Android**. No terminal needed.
+- **OTA reliability** — fixed a bug where a staged update could be silently
+  dropped at shutdown (the device would boot the previous version).
+- **Per-game FEX profiles actually apply** — a stale config shadowed the
+  profile system; game-compat tuning now behaves as documented.
+
+## Recap: v0.2.2-beta (same day)
 
 - **OTA updates are live** — Armada now updates itself: **Steam Settings →
   System → Check for updates**, exactly like a Steam Deck. No more re-flashing
