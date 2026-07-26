@@ -2,9 +2,11 @@
 set -euo pipefail
 
 steam_args=()
+is_desktop=0
 if [[ ${1:-} == "--desktop" ]]; then
     shift
     steam_args=(-steamdeck)
+    is_desktop=1
 fi
 
 steam_root="${STEAM_ROOT:-${HOME}/.local/share/Steam}"
@@ -40,6 +42,14 @@ fi
 # every per-game profile (making Compatible/per-game unreliable) and can poison
 # FEX code-cache code maps — so it is intentionally NOT exported.
 /usr/libexec/armada/powerbuttond >/dev/null 2>&1 &
+if [[ "${is_desktop}" == 0 ]]; then
+    # One-time gamepadui scale default (no-op unless the device profile sets
+    # ARMADA_STEAM_UI_SCALE — currently only the Mini V2, whose near-square
+    # panel maxes out Steam's auto interface scale). Gamepadui session only:
+    # in desktop Big Picture the display identity differs, and forcing a
+    # factor there would write the wrong config.vdf entry.
+    /usr/libexec/armada/steam-ui-scale >/dev/null 2>&1 &
+fi
 cd "${steam_arm_dir}"
 exec "${steam_arm}" \
     "${steam_args[@]}" \

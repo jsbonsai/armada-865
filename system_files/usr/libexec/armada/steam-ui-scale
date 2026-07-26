@@ -1,0 +1,297 @@
+#!/usr/bin/python3
+"""One-time default for Steam's gamepadui display scale (per-device).
+
+Steam's "Automatically Scale Interface" derives a factor from the display
+gamescope reports; on the Mini V2's near-square 1080x1240 panel it lands at
+the slider maximum and the UI is near-unusable. Physical-size hygiene
+(GAMESCOPE_FAKE_OUTPUT_MM, commit 884f64c) does not influence it.
+
+There is no reliable build-time config.vdf seed: the setting persists per
+display identity (InstallConfigStore > UI > display, keyed by Steam's
+strDisplayName, e.g. 'Internal: ...|||Fullscreen-1240x1080') and Steam
+rewrites that block from live display detection at startup, so a seeded
+block with a guessed name is discarded. Instead this helper issues the same
+two calls Steam's own Display settings page uses, once per install, over
+the CEF remote debugger that Decky already requires (localhost:8080):
+
+    SteamClient.Window.SetGamepadUIAutoDisplayScale(false)
+    SteamClient.Window.SetGamepadUIManualDisplayScaleFactor(<factor>)
+
+Steam then persists the factor itself under the correct display identity in
+config.vdf, so every later boot scales natively with no helper involved.
+
+Safety rails:
+  - only acts when the device profile sets ARMADA_STEAM_UI_SCALE (device-env);
+    RP5/Flip 2 leave it empty because auto-scale behaves on 1920x1080.
+  - never runs twice: a marker under ~/.config/armada is written on success,
+    so the Settings slider stays fully user-controlled afterwards.
+  - backs off (and writes the marker) if a manual scale is already set —
+    a user choice is never overridden.
+  - exits 0 on every path; it must never take the session down with it.
+"""
+
+import base64
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import time
+import urllib.request
+
+DEBUGGER_URL = "http://127.0.0.1:8080/json"
+SHARED_JS_TITLE = "SharedJSContext"
+TOTAL_BUDGET_S = 60 * 60  # first boot includes account sign-in; be patient
+POLL_INTERVAL_S = 10
+# Views materialized after a push (e.g. the first QAM open) can miss it, so
+# re-issue the (idempotent) calls a few times before trusting the result.
+REPUSH_DELAYS_S = (5, 15, 30, 60)
+
+STATE_EXPR = """
+(() => {
+  const s = window.settingsStore && window.settingsStore.settings;
+  if (!s || typeof s.bDisplayIsUsingAutoScale !== 'boolean')
+    return JSON.stringify({ready: false});
+  return JSON.stringify({
+    ready: true,
+    auto: s.bDisplayIsUsingAutoScale,
+    factor: s.flCurrentDisplayScaleFactor,
+    name: typeof s.strDisplayName === 'string' ? s.strDisplayName : null,
+  });
+})()
+"""
+
+APPLY_EXPR_TEMPLATE = """
+(() => {
+  const w = window.SteamClient && SteamClient.Window;
+  if (!w || typeof w.SetGamepadUIAutoDisplayScale !== 'function' ||
+      typeof w.SetGamepadUIManualDisplayScaleFactor !== 'function')
+    return 'noapi';
+  w.SetGamepadUIAutoDisplayScale(false);
+  w.SetGamepadUIManualDisplayScaleFactor(%.4f);
+  return 'applied';
+})()
+"""
+
+
+def log(message):
+    subprocess.run(
+        ["logger", "-t", "armada-steam-ui-scale", message],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def device_scale_factor():
+    """ARMADA_STEAM_UI_SCALE from the device profile, or None."""
+    result = subprocess.run(
+        [
+            "/usr/bin/bash",
+            "-c",
+            'eval "$(/usr/libexec/armada/device-env)"; '
+            'printf %s "${ARMADA_STEAM_UI_SCALE:-}"',
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        factor = float(raw)
+    except ValueError:
+        log(f"ignoring non-numeric ARMADA_STEAM_UI_SCALE {raw!r}")
+        return None
+    if not 0.5 <= factor <= 4.0:
+        log(f"ignoring out-of-range ARMADA_STEAM_UI_SCALE {factor}")
+        return None
+    return factor
+
+
+def marker_path():
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    config = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.join(config, "armada", "steam-ui-scale.v1")
+
+
+def write_marker(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=1)
+        f.write("\n")
+
+
+def shared_js_ws_url():
+    """webSocketDebuggerUrl of Steam's SharedJSContext, or None."""
+    with urllib.request.urlopen(DEBUGGER_URL, timeout=5) as response:
+        targets = json.load(response)
+    for target in targets:
+        if target.get("title") == SHARED_JS_TITLE:
+            return target.get("webSocketDebuggerUrl")
+    return None
+
+
+def _recv_exact(sock, count):
+    data = b""
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
+        if not chunk:
+            raise ConnectionError("websocket closed")
+        data += chunk
+    return data
+
+
+def _send_frame(sock, payload, opcode=0x1):
+    header = bytearray([0x80 | opcode])
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header += struct.pack(">H", length)
+    else:
+        header.append(0x80 | 127)
+        header += struct.pack(">Q", length)
+    mask = os.urandom(4)
+    header += mask
+    sock.sendall(bytes(header) + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+
+def _recv_message(sock):
+    """One complete websocket message (handles fragmentation, ping, close)."""
+    data = b""
+    while True:
+        first, second = _recv_exact(sock, 2)
+        opcode = first & 0x0F
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack(">H", _recv_exact(sock, 2))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", _recv_exact(sock, 8))[0]
+        mask = _recv_exact(sock, 4) if second & 0x80 else None
+        payload = _recv_exact(sock, length)
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        if opcode == 0x8:
+            raise ConnectionError("websocket close frame")
+        if opcode == 0x9:
+            _send_frame(sock, payload, opcode=0xA)  # ping -> pong
+            continue
+        if opcode == 0xA:
+            continue
+        data += payload
+        if first & 0x80:
+            return data
+
+
+def evaluate(ws_url, expression, timeout=15):
+    """Runtime.evaluate over CDP; returns the result value or None."""
+    scheme_rest = ws_url.split("://", 1)[1]
+    host_port, _, path = scheme_rest.partition("/")
+    host, _, port = host_port.partition(":")
+    sock = socket.create_connection((host, int(port or 80)), timeout=timeout)
+    sock.settimeout(timeout)
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall(
+            (
+                f"GET /{path} HTTP/1.1\r\n"
+                f"Host: {host_port}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode()
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("handshake EOF")
+            response += chunk
+        if b" 101 " not in response.split(b"\r\n", 1)[0]:
+            raise ConnectionError("websocket handshake refused")
+        request = {
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {"expression": expression, "returnByValue": True},
+        }
+        _send_frame(sock, json.dumps(request).encode())
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            message = json.loads(_recv_message(sock).decode())
+            if message.get("id") == 1:
+                return message.get("result", {}).get("result", {}).get("value")
+    finally:
+        sock.close()
+    return None
+
+
+def read_state(ws_url):
+    raw = evaluate(ws_url, STATE_EXPR)
+    if not isinstance(raw, str):
+        return None
+    state = json.loads(raw)
+    return state if state.get("ready") else None
+
+
+def main():
+    factor = device_scale_factor()
+    if factor is None:
+        return 0
+    marker = marker_path()
+    if os.path.exists(marker):
+        return 0
+
+    deadline = time.time() + TOTAL_BUDGET_S
+    announced = False
+    while time.time() < deadline:
+        try:
+            ws_url = shared_js_ws_url()
+            if ws_url:
+                state = read_state(ws_url)
+                if state:
+                    if not state["auto"]:
+                        # Manual scale already chosen (by the user, or by an
+                        # earlier run whose marker write failed) — keep it.
+                        log(f"manual scale {state.get('factor')} already set; leaving it")
+                        write_marker(marker, {"note": "already-manual", **state})
+                        return 0
+                    if not announced:
+                        log(
+                            f"auto scale {state.get('factor')} on "
+                            f"{state.get('name')!r}; applying manual {factor}"
+                        )
+                        announced = True
+                    apply_expr = APPLY_EXPR_TEMPLATE % factor
+                    if evaluate(ws_url, apply_expr) == "noapi":
+                        log("SteamClient.Window scale API missing; will retry")
+                    else:
+                        for delay in REPUSH_DELAYS_S:
+                            time.sleep(delay)
+                            ws_url = shared_js_ws_url() or ws_url
+                            evaluate(ws_url, apply_expr)
+                        final = read_state(ws_url)
+                        if final and not final["auto"]:
+                            log(
+                                f"applied scale {final.get('factor')} on "
+                                f"{final.get('name')!r}; Steam persists it"
+                            )
+                            write_marker(marker, {"note": "applied", **final})
+                            return 0
+        except Exception as error:  # noqa: BLE001 — never take the session down
+            log(f"retrying after: {error!r}")
+        time.sleep(POLL_INTERVAL_S)
+    log("gave up for this session (no marker written; will retry next boot)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:  # noqa: BLE001
+        sys.exit(0)
