@@ -117,6 +117,10 @@ step() { echo; echo ">>> $*"; }
 cleanup() {
     local rc=$?
     [[ -n "$INHIBIT_PID" ]] && kill "$INHIBIT_PID" 2>/dev/null || true
+    # Stale staging from an aborted run: pre-9e68a45 builds staged the /var seed
+    # on tmpfs and a failure left it there, filling /tmp so even small later
+    # temp writes (grub-efi-update's ESP staging) died ENOSPC on the next try.
+    rm -rf /tmp/armada-var.* "${TARGET:+$TARGET/.armada-var-seed}" 2>/dev/null || true
     [[ -n "$TARGET" ]] && { umount -R "$TARGET" 2>/dev/null || true; rmdir "$TARGET" 2>/dev/null || true; }
     if (( rc != 0 && destructive == 1 )); then
         if (( REINSTALL )); then
