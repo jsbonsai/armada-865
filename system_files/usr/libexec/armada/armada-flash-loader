@@ -63,11 +63,31 @@ fi
 SHA=$(img_sha "${DEVICE}") || { echo "unknown device '${DEVICE}'" >&2; exit 1; }
 IMG_NAME="u-boot-sm8250-retroidpocket-${DEVICE}.img"
 
-PART=/dev/disk/by-partlabel/loader
-[ -b "${PART}" ] || { echo "no 'loader' partition found (${PART}) — is this a Retroid SM8250 device?" >&2; exit 1; }
-PART_DEV=$(readlink -f "${PART}")
-PART_SIZE=$(blockdev --getsize64 "${PART_DEV}")
-[ "${PART_SIZE}" -ge "${IMG_SIZE}" ] || { echo "loader partition (${PART_SIZE}B) smaller than image (${IMG_SIZE}B)?!" >&2; exit 1; }
+# Loader partition discovery. RP5 exposes a single 'loader'; the Mini V2 has
+# A/B slots 'loader_a'+'loader_b' (flash BOTH — fastboot's 'loader' alias only
+# writes the active slot, so a later slot switch would resurrect the bad build).
+# Some UFS boot LUNs aren't partition-scanned by the kernel at boot (no
+# /dev/sdXN nodes, hit on the Mini V2) — partx -a materializes them.
+PARTS=()
+for name in loader loader_a loader_b; do
+    [ -b "/dev/disk/by-partlabel/${name}" ] && PARTS+=("$(readlink -f "/dev/disk/by-partlabel/${name}")")
+done
+if [ "${#PARTS[@]}" -eq 0 ]; then
+    for disk in /dev/sd?; do
+        if partx --show "${disk}" 2>/dev/null | awk '{print $NF}' | grep -qx 'loader\(_[ab]\)\?'; then
+            partx -a "${disk}" 2>/dev/null || true
+            udevadm settle 2>/dev/null || true
+            while read -r nr pname; do
+                [ -b "${disk}${nr}" ] && PARTS+=("${disk}${nr}")
+            done < <(partx --show "${disk}" | awk '$NF ~ /^loader(_[ab])?$/ {print $1, $NF}')
+        fi
+    done
+fi
+[ "${#PARTS[@]}" -gt 0 ] || { echo "no loader/loader_a/loader_b partition found — is this a Retroid SM8250 device?" >&2; exit 1; }
+for p in "${PARTS[@]}"; do
+    sz=$(blockdev --getsize64 "$p")
+    [ "${sz}" -ge "${IMG_SIZE}" ] || { echo "loader partition $p (${sz}B) smaller than image (${IMG_SIZE}B)?!" >&2; exit 1; }
+done
 
 WORK=$(mktemp -d)
 trap 'rm -rf "${WORK}"' EXIT
@@ -79,24 +99,35 @@ if [ ! -f "${IMG}" ]; then
 fi
 echo "${SHA}  ${IMG}" | sha256sum -c - >/dev/null || { echo "sha256 mismatch on ${IMG} — refusing to flash" >&2; exit 1; }
 
-BACKUP="${BACKUP_DIR}/loader-backup-$(date +%Y%m%d-%H%M%S).img"
+TS=$(date +%Y%m%d-%H%M%S)
 mkdir -p "${BACKUP_DIR}"
-dd if="${PART_DEV}" of="${BACKUP}" bs=4M status=none
+# Backups land on internal AND the SD ESP — the SD survives any internal mishap.
+SD_BACKUPS=/boot/efi/loader-backups
+mkdir -p "${SD_BACKUPS}" 2>/dev/null || SD_BACKUPS=""
+for p in "${PARTS[@]}"; do
+    b="${BACKUP_DIR}/loader-backup-$(basename "$p")-${TS}.img"
+    dd if="$p" of="$b" bs=4M status=none
+    [ -n "${SD_BACKUPS}" ] && cp "$b" "${SD_BACKUPS}/" 2>/dev/null || true
+    echo "backed up $p -> $b$([ -n "${SD_BACKUPS}" ] && echo ' (+ SD copy)')"
+done
 sync
-echo "current loader backed up to ${BACKUP} (${PART_SIZE} bytes)"
 
-echo "About to flash ${IMG_NAME} (rp-v1.0.1) to ${PART_DEV} (${DEVICE})."
+echo "About to flash ${IMG_NAME} (rp-v1.0.1) to: ${PARTS[*]} (${DEVICE})."
 if [ "${YES}" != 1 ]; then
     read -r -p "Proceed? [y/N] " a
     case "${a}" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1 ;; esac
 fi
 
-dd if="${IMG}" of="${PART_DEV}" bs=4M conv=fsync status=none
-# Read back exactly the image span and verify.
-READBACK_SHA=$(dd if="${PART_DEV}" bs="${IMG_SIZE}" count=1 status=none | sha256sum | cut -d' ' -f1)
-[ "${READBACK_SHA}" = "${SHA}" ] || {
-    echo "VERIFY FAILED after write — restore with: dd if=${BACKUP} of=${PART_DEV} bs=4M conv=fsync" >&2
-    echo "or from fastboot (Vol- + Power): fastboot flash loader ${BACKUP}" >&2
-    exit 1
-}
-echo "OK: loader flashed and verified. Boot menu + GRUB should render correctly on next boot."
+for p in "${PARTS[@]}"; do
+    dd if="${IMG}" of="$p" bs=4M conv=fsync status=none
+    # Read back exactly the image span and verify.
+    READBACK_SHA=$(dd if="$p" bs="${IMG_SIZE}" count=1 status=none | sha256sum | cut -d' ' -f1)
+    [ "${READBACK_SHA}" = "${SHA}" ] || {
+        echo "VERIFY FAILED on $p — restore with: dd if=${BACKUP_DIR}/loader-backup-$(basename "$p")-${TS}.img of=$p bs=4M conv=fsync" >&2
+        echo "or from fastboot (Vol- + Power): fastboot flash loader <backup>" >&2
+        exit 1
+    }
+    echo "OK: $p flashed and verified."
+done
+sync
+echo "Done. Boot menu + GRUB should render correctly on next boot."
