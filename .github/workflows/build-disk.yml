@@ -69,6 +69,23 @@ jobs:
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      - name: Resolve container tag
+        id: tag
+        env:
+          CUSTOM_TAG: ${{ inputs.custom_tag }}
+          SELECTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${CUSTOM_TAG}"
+          if [ -z "${tag}" ]; then
+            tag="${SELECTED_TAG}"
+          fi
+          if ! [[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::Tag '${tag}' is not a valid container tag. Use letters, numbers, dots, underscores, or dashes."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
       - name: Build Armada image
         run: |
           set -euxo pipefail

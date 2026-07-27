@@ -1,7 +1,7 @@
 import { Field, PanelSection, Tabs } from "@decky/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { getConfig, savePowerConfig, saveTweaks } from "./backend";
+import { getConfig, getInstalledGames, savePowerConfig, saveTweaks } from "./backend";
 import { useDebouncedSave } from "./hooks/useDebouncedSave";
 import { tabIcons } from "./icons";
 import { currentGame } from "./lib/games";
@@ -17,6 +17,7 @@ export function Content() {
   const [message, setMessage] = useState("Loading");
   const savedPowerSnapshot = useRef("");
   const savedTweaksSnapshot = useRef("");
+  const installedGamesRequested = useRef(false);
   const load = useCallback(async () => {
     try {
       const next = await getConfig();
@@ -24,7 +25,7 @@ export function Content() {
       next.selectedGame = next.game || null;
       savedPowerSnapshot.current = JSON.stringify(next.power);
       savedTweaksSnapshot.current = JSON.stringify(next.tweaks);
-      setConfig(next);
+      setConfig((current) => ({ ...next, installedGames: current?.installedGames || next.installedGames }));
     } catch (error) {
       setMessage(String(error));
     }
@@ -32,6 +33,20 @@ export function Content() {
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    if (!config || installedGamesRequested.current) return;
+    installedGamesRequested.current = true;
+    let cancelled = false;
+    getInstalledGames()
+      .then((installedGames) => {
+        if (cancelled) return;
+        setConfig((current) => (current ? { ...current, installedGames } : current));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [!!config]);
   useEffect(() => {
     if (!config) return;
     let cancelled = false;

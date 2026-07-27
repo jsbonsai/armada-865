@@ -15,11 +15,6 @@ rm -rf /usr/lib/modules/*
 tar --extract --zstd -f "${TARBALL}" -C /usr/
 depmod -a "${KVER}" -b /
 
-# Dracut config must exist before initramfs generation.
-install -Dpm 0644 \
-    /ctx/system_files/usr/lib/dracut/dracut.conf.d/10-armada.conf \
-    /usr/lib/dracut/dracut.conf.d/10-armada.conf
-
 # dracut MODULE_FIRMWARE introspection needs firmware at the build-time path.
 mkdir -p /usr/lib/firmware
 cp -a /ctx/system_files/usr/lib/firmware/. /usr/lib/firmware/

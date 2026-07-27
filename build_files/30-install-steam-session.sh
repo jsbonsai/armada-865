@@ -26,6 +26,8 @@ dnf5 -y install --setopt=install_weak_deps=False /packages/inputplumber/inputplu
 # Patched NetworkManager: /etc/NetworkManager/ignore-sleep keeps wifi up across fake-suspend.
 dnf5 -y install --setopt=install_weak_deps=False /packages/networkmanager/*.rpm
 
+dnf5 -y install --setopt=install_weak_deps=False /packages/jupiter-hw-support/*.rpm
+
 # Avoid gamescope-session-ogui-steam/-powerstation; Terra's aarch64 deps are broken.
 dnf5 -y install --setopt=install_weak_deps=False --enable-repo=terra \
     gamescope-session \
@@ -49,23 +51,34 @@ sed -i \
     's/read -r -t 5 response_x_display response_wl_display/read -r -t 15 response_x_display response_wl_display/' \
     /usr/share/gamescope-session-plus/gamescope-session-plus
 
-# Fedora's FEX lacks thunks.
 dnf5 -y install --setopt=install_weak_deps=False \
-    fex-emu-rootfs-fedora \
     erofs-fuse \
     erofs-utils \
+    fuse-libs \
+    lsb_release \
     squashfuse \
     squashfs-tools
+
 dnf5 -y install --setopt=install_weak_deps=False /packages/fex/fex-emu-*.rpm
 
+# Use Arch rootfs for better compatibility with Linux games targeting SteamOS
+mkdir -p /usr/share/fex-emu/RootFS
+ARCH_ROOTFS_URL="https://rootfs.fex-emu.gg/ArchLinux/2026-01-08/ArchLinux.sqsh"
+ARCH_ROOTFS_SHA256="cb059973b7953ad9165845529655189b96f9a174b14a6a149c87ec884b0c5e90"
+curl --retry 3 --retry-delay 2 -fsSL -o /usr/share/fex-emu/RootFS/ArchLinux.sqsh "${ARCH_ROOTFS_URL}"
+echo "${ARCH_ROOTFS_SHA256}  /usr/share/fex-emu/RootFS/ArchLinux.sqsh" | sha256sum -c -
+
 # /usr/share config stays user-overridable; ~/.fex-emu would mask it.
-mkdir -p /usr/share/fex-emu
-# Host thunks live in Fedora's lib64 path.
 cat > /usr/share/fex-emu/Config.json <<'EOF'
 {
   "Config": {
-    "RootFS": "default.erofs",
+    "RootFS": "ArchLinux.sqsh",
+    "TSOEnabled": "1",
     "X87ReducedPrecision": "1",
+    "Multiblock": "0",
+    "VectorTSOEnabled": "0",
+    "MemcpySetTSOEnabled": "0",
+    "HalfBarrierTSOEnabled": "1",
     "ThunkHostLibs": "/usr/lib64/fex-emu/HostThunks",
     "ThunkGuestLibs": "/usr/share/fex-emu/GuestThunks"
   },
@@ -122,19 +135,13 @@ rm -rf "${PROTON_DIR:?}/${PROTON_TOOL_NAME}"
 mv "${PROTON_DIR}/${PROTON_ARCHIVE_NAME}" "${PROTON_DIR}/${PROTON_TOOL_NAME}"
 # Missing runtime app makes Steam fall back to Proton 10.
 sed -i '/require_tool_appid/d' "${PROTON_DIR}/${PROTON_TOOL_NAME}/toolmanifest.vdf"
-cat > "${PROTON_DIR}/${PROTON_TOOL_NAME}/armada-proton" <<'EOF'
-#!/bin/sh
-exec /usr/libexec/armada/armada-proton-wrapper "$(dirname "$0")/proton" "$@"
-EOF
-chmod +x "${PROTON_DIR}/${PROTON_TOOL_NAME}/armada-proton"
-sed -i 's#"commandline"[[:space:]]*"/proton #"commandline" "/armada-proton #' \
-    "${PROTON_DIR}/${PROTON_TOOL_NAME}/toolmanifest.vdf"
 python3 /ctx/build_files/set-steam-default-compat.py "${STEAM_HOME}" "${PROTON_TOOL_NAME}" "${PROTON_DIR}"
 rm -f "/tmp/${PROTON_TAR}" "/tmp/${PROTON_ARCHIVE_NAME}.sha512sum"
 
-# Pin Steam + Proton to their own rechunk layers (build-chunked-oci reads the
+# Pin Steam, Proton, and the FEX rootfs to their own rechunk layers (build-chunked-oci reads the
 # user.component xattr) so a system_files change doesn't re-pull them every OTA.
 python3 -c 'import os,sys; os.setxattr(sys.argv[1],"user.component",b"steam")' "${STEAM_HOME}"
 python3 -c 'import os,sys; os.setxattr(sys.argv[1],"user.component",b"proton")' "${PROTON_DIR}/${PROTON_TOOL_NAME}"
+python3 -c 'import os,sys; os.setxattr(sys.argv[1],"user.component",b"fex-rootfs")' /usr/share/fex-emu/RootFS
 
 echo "Pre-staged: ARM64 Steam bootstrap + CachyOS Proton 11 ${PROTON_VER}"

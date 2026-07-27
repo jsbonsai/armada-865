@@ -5,13 +5,13 @@ from .system import cpu_device_class, os_version, ssh_enabled
 from .tweaks import fex_profile_labels, load_fex_contract, load_tweaks
 
 
-def build_config():
+def build_config(include_games=True):
     fex_contract = load_fex_contract()
     return {
         "power": parse_power(),
         "powerDefaults": factory_power_defaults(),
         "tweaks": load_tweaks(),
-        "installedGames": installed_games(),
+        "installedGames": installed_games() if include_games else [],
         "fexProfiles": fex_profile_labels(fex_contract),
         "cpuDeviceClass": cpu_device_class(),
         "osVersion": os_version(),

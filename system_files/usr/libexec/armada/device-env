@@ -24,6 +24,8 @@ case "$model" in
     "AYN Odin 3") profile=ayn-odin-3 ;;
     "Retroid Pocket 6 (D-Pad Bottom)") profile=retroid-pocket-6 ;;
     "Retroid Pocket 6 (D-Pad Top)") profile=retroid-pocket-6 ;;
+    "Retroid Pocket 6") profile=retroid-pocket-6 ;;
+    "Retroid Pocket 6 TOP-DPAD") profile=retroid-pocket-6 ;;
     "Retroid Pocket 5") profile=retroid-pocket-5 ;;
     "Retroid Pocket Flip2") profile=retroid-pocket-flip-2 ;;
     "Retroid Pocket Mini V2") profile=retroid-pocket-mini-v2 ;;
@@ -38,7 +40,12 @@ vars=(
     ARMADA_DEVICE_ID
     ARMADA_DEVICE_NAME
     ARMADA_SOC_CLASS
+    ARMADA_SUSPEND_MODE
     ARMADA_PRIMARY_CONNECTOR
+    ARMADA_PRIMARY_BACKLIGHT
+    ARMADA_SECONDARY_CONNECTOR
+    ARMADA_PRIMARY_TOUCHSCREEN
+    ARMADA_SECONDARY_TOUCHSCREEN
     ARMADA_PANEL_TYPE
     ARMADA_PANEL_ORIENTATION
     ARMADA_PANEL_NATIVE_WIDTH
@@ -48,7 +55,6 @@ vars=(
     ARMADA_GAMESCOPE_FAKE_OUTPUT_MM
     ARMADA_STEAM_UI_SCALE
     ARMADA_GAMEPAD_QUIRK
-    ARMADA_GPU_GAME_FLOOR_MHZ
 )
 
 for var in "${vars[@]}"; do

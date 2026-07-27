@@ -36,12 +36,12 @@ matches:
       sys_path: /sys/firmware/devicetree/base
       attributes:
         - name: model
-          value: Retroid Pocket 6 (D-Pad Bottom)
+          value: Retroid Pocket 6
   - udev:
       sys_path: /sys/firmware/devicetree/base
       attributes:
         - name: model
-          value: Retroid Pocket 6 (D-Pad Top)
+          value: Retroid Pocket 6 TOP-DPAD
 
 # Only allow a single source device per composite device of this type.
 single_source: false
@@ -54,6 +54,7 @@ source_devices:
       phys_path: rsinput-gamepad/input0
       handler: event*
     capability_map_id: ayn_mcu
+    passthrough: true
 
 # Optional configuration for the composite device
 options:

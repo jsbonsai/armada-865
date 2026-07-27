@@ -4,7 +4,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .system import atomically_write, run_cmd
+from .privileged import call
 
 POWER_CONFIG = Path("/etc/armada/power-profiles.conf")
 FACTORY_POWER_CONFIG = Path("/usr/share/armada/power-profiles.conf")
@@ -147,5 +147,4 @@ def save_power_config(data):
         rendered = render_power(data, factory_power_defaults())
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed power config: {exc}")
-    atomically_write(POWER_CONFIG, rendered)
-    run_cmd(["/usr/bin/armada-power", "reload"], timeout=15, capture=False)
+    call("write_config", name="power", text=rendered)

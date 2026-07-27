@@ -83,14 +83,66 @@ mapping:
       gamepad:
         button: Select
 
-  - name: F1 Key
+  - name: QAM (Aya)
     source_events:
       - evdev:
           event_type: KEY
           event_code: BTN5
           value_type: button
     target_event:
-      keyboard: KeyF1
+      gamepad:
+        button: QuickAccess
+
+  - name: Guide (Steam button, redundant)
+    source_events:
+      - evdev:
+          event_type: KEY
+          event_code: BTN2
+          value_type: button
+    target_event:
+      gamepad:
+        button: Guide
+
+  - name: Left Paddle 1 (L4)
+    source_events:
+      - evdev:
+          event_type: KEY
+          event_code: BTN3
+          value_type: button
+    target_event:
+      gamepad:
+        button: LeftPaddle1
+
+  - name: Right Paddle 1 (R4)
+    source_events:
+      - evdev:
+          event_type: KEY
+          event_code: BTN4
+          value_type: button
+    target_event:
+      gamepad:
+        button: RightPaddle1
+
+  - name: Left Paddle 2 (L5)
+    source_events:
+      - evdev:
+          event_type: KEY
+          event_code: BTN7
+          value_type: button
+    target_event:
+      gamepad:
+        button: LeftPaddle2
+
+  - name: Right Paddle 2 (R5)
+    source_events:
+      - evdev:
+          event_type: KEY
+          event_code: BTN6
+          value_type: button
+    target_event:
+      gamepad:
+        button: RightPaddle2
+
 
   - name: Right Trigger
     source_events:

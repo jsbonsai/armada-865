@@ -13,7 +13,7 @@ default:
     @just --list
 
 [group('Just')]
-check:
+check: test
     #!/usr/bin/bash
     find . -type f -name "*.just" | while read -r file; do
     	echo "Checking syntax: $file"
@@ -21,6 +21,16 @@ check:
     done
     echo "Checking syntax: Justfile"
     just --unstable --fmt --check -f Justfile
+
+[group('Test')]
+test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    for test_file in tests/*-test.sh; do
+        echo "Running test: ${test_file}"
+        bash "${test_file}"
+    done
 
 [group('Just')]
 fix:
@@ -73,6 +83,33 @@ build $target_image=image_name $tag=default_tag:
     ARMADA_VERSION="$(TZ=America/New_York date +%Y%m%d).$(git rev-parse --short HEAD)"
     BUILD_ARGS+=("--build-arg" "ARMADA_VERSION=${ARMADA_VERSION}")
 
+    # Allow local armada-packages images to override pinned package images.
+    mapfile -t PKG_VARS < <(sed -n 's/^ARG \([A-Z0-9_]*_PKG\)=.*/\1/p' Containerfile)
+    declare -A KNOWN_PKG_VARS=()
+    for var in "${PKG_VARS[@]}"; do
+        KNOWN_PKG_VARS["${var}"]=1
+    done
+    for p in ${ARMADA_LOCAL_PKGS:-}; do
+        var="$(echo "$p" | tr '[:lower:]-' '[:upper:]_')_PKG"
+        if [[ -z "${KNOWN_PKG_VARS[$var]:-}" ]]; then
+            echo "unknown package in ARMADA_LOCAL_PKGS: ${p}" >&2
+            exit 1
+        fi
+        export "${var}=localhost/armada-packages/${p}:latest"
+    done
+    LOCAL_PKG=0
+    for var in "${PKG_VARS[@]}"; do
+        if [[ -n "${!var:-}" ]]; then
+            BUILD_ARGS+=("--build-arg" "${var}=${!var}")
+            [[ "${!var}" == localhost/* ]] && LOCAL_PKG=1
+            echo "==> using ${var}=${!var}"
+        fi
+    done
+
+    # localhost package images need --pull=missing.
+    PULL_POLICY="newer"
+    [[ "${LOCAL_PKG}" == 1 ]] && PULL_POLICY="missing"
+
     SECRET_ARGS=()
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         SECRET_ARGS+=("--secret" "id=GITHUB_TOKEN,env=GITHUB_TOKEN")
@@ -82,7 +119,7 @@ build $target_image=image_name $tag=default_tag:
         "${BUILD_ARGS[@]}" \
         "${SECRET_ARGS[@]}" \
         --platform linux/arm64 \
-        --pull=newer \
+        --pull="${PULL_POLICY}" \
         --tag "${target_image}:${tag}" \
         .
 
