@@ -436,9 +436,13 @@ copy_current_bootc_deployment() {
 
 seed_var() {
     # ostree admin deploy does not populate /var; seed it from the image commit so
-    # /var/home/armada lands with the image's ownership.
-    local varseed
-    varseed=$(mktemp -d -t armada-var.XXXXXX)
+    # /var/home/armada lands with the image's ownership. Stage on the TARGET
+    # filesystem, NOT mktemp: /tmp is RAM-backed tmpfs and the seed includes
+    # multi-GB preseeded flatpaks — ENOSPC killed the Mini V2's first install
+    # (2026-07-27) mid-checkout.
+    local varseed="$TARGET/.armada-var-seed"
+    rm -rf "$varseed"
+    mkdir -p "$varseed"
     ostree checkout --repo="$TARGET/ostree/repo" --subpath=/var "$commit" "$varseed/v"
     cp -a "$varseed/v/." "$TARGET/var/"
     rm -rf "$varseed"
