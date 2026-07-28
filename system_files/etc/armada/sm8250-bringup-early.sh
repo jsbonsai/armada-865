@@ -72,6 +72,8 @@ setup_power() {
     local frag dst=/etc/armada/power-profiles.conf
     case "$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)" in
         *"Mini V2"*) frag=/usr/share/armada/power-profiles.d/retroid-pocket-mini-v2.conf ;;
+        *"Pocket 5"*) frag=/usr/share/armada/power-profiles.d/retroid-pocket-5.conf ;;
+        # Flip 2 keeps factory curves until its own ear-test/calibration pass.
         *) return 0 ;;
     esac
     [ -r "$frag" ] || return 0

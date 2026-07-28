@@ -1,4 +1,4 @@
-# Armada-865 v0.2.3-beta
+# Armada-865 v0.3.0-beta
 
 A SteamOS-like experience on Snapdragon 865 (SM8250) Retroid handhelds. See the
 [README](../../tree/sm8250#readme) for the full story, what works, and how this
@@ -10,18 +10,49 @@ fork differs from upstream Armada.
 
 ---
 
-## ✨ What's new in v0.2.3-beta
+## ✨ What's new in v0.3.0-beta
 
-- **Graphical internal-storage installer** — boot the SD, open Desktop Mode, and
-  the **Armada Installer** app installs Armada to internal storage with a big
-  Android-size slider — or detects an existing install and offers
-  **Reinstall** / **Remove & Restore Android**. No terminal needed.
-- **OTA reliability** — fixed a bug where a staged update could be silently
-  dropped at shutdown (the device would boot the previous version).
-- **Per-game FEX profiles actually apply** — a stale config shadowed the
-  profile system; game-compat tuning now behaves as documented.
+### Fans that finally behave
 
-## Recap: v0.2.2-beta (same day)
+Until now the fan on these devices ran at **one fixed speed, forever** — the
+same constant ~20% hum whether the device was ice-cold idle or working hard at
+82°C (it literally never ramped — a firmware table nobody was driving). This
+release replaces that with a real temperature-driven fan system, tuned per
+device from live telemetry:
+
+- **Silent at idle** (Retroid Pocket 5 and Mini V2): below ~55–59°C the fan is
+  **off**. Menus, the Steam home screen, video — silence.
+- **One steady speed while gaming** — the curve holds a flat level across each
+  device's measured in-game temperature band instead of hunting up and down.
+- **Gradual, smooth transitions** — spin-up and spin-down are slew-limited;
+  no sudden fan lurches.
+- **Full cooling strength under heavy load** — at the hottest measured
+  workloads (big downloads, 80°C+) cooling matches or exceeds the old behavior.
+  Kernel thermal protection remains active underneath as an independent backstop.
+- Flip 2 keeps the standard curves this release (its tuning pass is next).
+
+### Power modes, unified (this was confusing before — read once)
+
+**Eco / Balanced / Performance is now ONE mode with two buttons.** Pressing a
+power mode in Steam's Quick Access menu and pressing one in the Armada Control
+plugin now set the **same** underlying mode — whichever you pressed last wins.
+Each mode is a bundle: CPU clocks + GPU behavior + **which fan curve runs**
+(Eco = quietest/latest-spinning, Performance = earliest-spinning). Previously
+the Quick Access buttons weren't connected to Armada's power system at all,
+which made the two menus feel contradictory. Now: one mode, two doors.
+
+### Mainline sync
+
+This release folds in ~78 commits from upstream Armada: the new FEX 2607
+emulation core, an updated Armada Control plugin (settings now persist
+properly; per-game Proton selection), `-noshaders` (no background shader
+processing — trades pre-warmed caches for zero background CPU burn), improved
+power-button handling, and assorted fixes. **Known trade-off:** some games may
+run a couple of FPS below the previous release with FEX 2607 (per-game FEX
+version selection is in development); first runs of a game may stutter briefly
+while caches rebuild, then smooth out.
+
+## Recap: v0.2.x highlights
 
 - **OTA updates are live** — Armada now updates itself: **Steam Settings →
   System → Check for updates**, exactly like a Steam Deck. No more re-flashing
