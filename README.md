@@ -1,274 +1,126 @@
 # Armada-865
 
-**A Snapdragon 865 (SM8250)–specific fork of [Armada](https://github.com/virtudude/armada)**
-— the SteamOS-like Linux distribution for ARM handhelds built on Fedora bootc —
-ported to and maintained for:
+**A Snapdragon 865 (SM8250) fork of [Armada](https://github.com/virtudude/armada)** —
+the SteamOS-like Linux distribution for ARM handhelds, built on Fedora bootc —
+ported to and maintained for the Retroid Pocket SM8250 family.
 
 | Device | Status |
 |---|---|
 | **Retroid Pocket 5** | ✅ Primary target, most tested |
-| **Retroid Pocket Flip 2** | ✅ Boots & plays; minor papercuts (see below) |
-| **Retroid Pocket Mini V2** | ✅ Boots & plays — the near-square 1080×1240 "smallest SteamOS handheld" |
-| Retroid Pocket Mini (v1) | 🔜 Planned (device tree exists in ROCKNIX) |
+| **Retroid Pocket Flip 2** | ✅ Boots & plays (lid sleep/wake works; fan tuning pass pending) |
+| **Retroid Pocket Mini V2** | ✅ Fully supported — the near-square 1080×1240 "smallest SteamOS handheld" |
+| Retroid Pocket Mini (v1) | 🔜 Planned |
 
-Upstream Armada targets SM8550/SM8650/SM8750 devices. This fork exists because
-SM8250 needs its own kernel enablement, a **different boot architecture**, and a
-substantially different audio bring-up — all documented below.
-
-What you get: native ARM64 Steam with the gamepad UI, CachyOS Proton + FEX for
-x86/Windows games, Vulkan via freedreno/turnip on the Adreno 650, power profiles
-in the quick-access menu, Decky — with Android left intact on internal storage.
-
-> ⚠️ **Early community beta.** Expect bugs — and please report them.
+> ⚠️ **Early community beta.** Expect bugs — and please [report them](#reporting-issues).
 >
-> **Completely non-invasive:** runs entirely from microSD using the **stock
-> Retroid bootloader's boot menu** — no bootloader flashing, no root, nothing
-> written to the device. Remove the SD card and it's exactly the phone-stock
-> handheld it was.
->
-> **Default credentials:** user `armada`, password `armada`. If you enable SSH,
-> change the password.
+> **Non-invasive by default:** runs entirely from microSD via the stock Retroid
+> boot menu — no bootloader flashing, no root. Remove the SD and the device is
+> stock again. Default login: `armada` / `armada` (change it if you enable SSH).
 
----
+## Features
 
-## Install
+- **Native ARM64 Steam** with the full gamepad UI; **CachyOS Proton + FEX** for
+  x86/Windows games; Vulkan via freedreno/turnip on the Adreno 650; Decky.
+- **Over-the-air updates** — after one flash, the OS updates itself from
+  *Steam Settings → System → Check for updates*, like a Steam Deck. Images are
+  cryptographically signed and verified on-device.
+- **Graphical internal-storage installer** — install to internal UFS (keeping
+  Android) from a desktop app with a storage slider; reinstall and full
+  uninstall included.
+- **Tuned thermals** — the fan is *off* at cool idle and holds one steady speed
+  in games (RP5 & Mini V2; temperature-driven with kernel failsafes beneath).
+- **One power mode, everywhere** — Eco/Balanced/Performance set from either the
+  Quick Access menu or Armada Control control the same thing: CPU/GPU behavior
+  *and* the fan curve. Last press wins.
+- **Performance & compatibility handled for you** — game helper threads pinned
+  to fast cores, GPU hang auto-recovery, per-device input calibration, startup-
+  movie titles fixed, Mini V2 UI scale set automatically on first boot.
 
-You need: a 64 GB+ microSD (A2 class recommended), a PC to flash it, and your
-RP5 / Flip 2.
+## Quick start
 
-**1. Flash the Armada-865 image to the SD card.**
-Download from **[Releases](../../releases)**, flash with balenaEtcher /
-Raspberry Pi Imager / `dd`. The image auto-expands to fill the card on first
-boot. (If the release is split into parts, joining instructions are in the
-release notes.)
+1. Download all parts from the [latest release](../../releases/latest), extract
+   the `.split.zip`, and flash the `armada-*.img.gz` to a 64 GB+ microSD with
+   balenaEtcher or Raspberry Pi Imager.
+2. Insert the SD and power on **holding Volume Up** → boot menu → **Boot**.
+   Armada auto-selects your device and boots straight to Steam.
+3. Sign in and play. First boot takes a few minutes.
 
-**2. Boot Armada.**
+Full walkthrough (including per-device notes and recovery):
+**[docs/setup-guide.md](docs/setup-guide.md)**
 
-- Insert the SD card and reboot **holding Volume Up** → the stock boot menu
-  appears → boot from SD → Armada boots straight through (each device
-  auto-selects its own boot entry; hold any key during the 1-second window if
-  you ever need the GRUB menu).
-- First boot takes a few minutes (filesystem expansion, Steam setup).
+**Mini V2 owners:** if pre-Linux boot screens look garbled, run
+`sudo armada-flash-loader` once — it installs
+[Retroid's official fixed bootloader](https://github.com/RetroidPocket/u-boot/releases/tag/rp-v1.0.1)
+(with backup). Explanation in the setup guide.
 
-> **Mini V2 notes:**
-> - If the pre-Linux boot screens (U-Boot menu / GRUB) render **garbled**, your
->   device has the faulty bootloader from a Retroid Android OTA. Once booted
->   into Armada, run `sudo armada-flash-loader` — it flashes
->   [Retroid's official fixed U-Boot](https://github.com/RetroidPocket/u-boot/releases/tag/rp-v1.0.1)
->   (backing up the old one first), and every boot screen renders correctly
->   from the next boot. Armada boots fine either way; this is cosmetic.
-> - **First-time scaling:** the Mini's near-square screen makes the Steam UI
->   oversized/cut-off by default. Fix it once: **Settings → Display →** turn off
->   *Automatically Scale Interface* and lower the scale slider to ~50%.
-> - Widescreen games letterbox (black bars) on the square panel — expected; on
->   the black bezel they largely disappear.
+## Updating
 
-Boot without the SD (or without holding Vol+) and you're in stock Android as
-always. (The image also carries a `rocknix_abl` folder inherited from upstream's
-AYN/AYANEO install flow — **Retroid SM8250 devices don't need it**; ignore it.)
+You never re-flash. **Steam Settings → System → Check for updates.** Internal
+installs update the same way.
 
-## What works
+## Install to internal storage (optional)
 
-Controls (presents as a SteamOS handheld), display + brightness, speakers
-(self-healing — see the audio section), Wi-Fi, battery status,
-Eco/Balanced/Performance power profiles (QAM → Armada Control), Decky, games via
-Proton/FEX — tested: Hades, Castle Crashers, DMC4, DMC5, L4D2, MK9, Boltgun.
-Rumble works on Flip 2. Ballpark: Hades ~55–60 fps @ 720p on Performance;
-2000s/2010s titles are the sweet spot (figure ~40–50% of an SM8550 device's CPU).
+Boot from SD → Desktop Mode → **Armada Installer** → choose Android's share of
+storage → install. Android is kept but factory-reset; games load much faster
+from internal. Reinstall/uninstall from the same app. Validated on RP5 and
+Mini V2. Details: [docs/internal-install.md](docs/internal-install.md).
 
-**Automatic performance & compatibility (built in, no config):** DXVK/wine helper
-threads are pinned to the fast CPU cluster at launch (measured ~+16% FPS on DMC4);
-games with startup movies/cutscenes (e.g. Boltgun) now launch instead of hanging on
-a black screen; and if a game hard-locks the GPU, the driver recovers to Steam
-instead of requiring a reboot.
+## What works & performance
 
-**Quick-access menu:** on the RP5, press **Back** or **double-tap Home**; on
-the Flip 2 (which has no Back button), **double-tap Home**. The brief Steam-menu
-flicker on double-tap is cosmetic.
+Controls, display + brightness, speakers, Wi-Fi, battery, rumble (RP5 & Flip 2),
+sleep/wake (short-press power; Flip 2 lid), power profiles, Decky, OTA updates.
 
-**Sleep/wake:** short-press power to sleep, press again to wake (instant). The
-Flip 2 also sleeps on **lid close** and wakes on lid open.
+Tested games include Hades, DMC4, Castle Crashers, L4D2, MK9, Boltgun.
+Ballpark: Hades ~55–60 fps @ 720p, DMC4 ~55–60 fps on Performance; 2000s/2010s
+titles are the sweet spot (~40–50 % of an SM8550 device's CPU).
 
-**Getting the most performance:** there are currently *two* performance
-controls, and for max FPS set **both** to Performance:
-1. The SteamOS **Performance side-panel** (QAM → gear/performance tab).
-2. **Armada Control** (QAM → Decky/plug icon → Armada Control → Edit power
-   profile) — this one lifts the CPU underclock (Balanced caps the prime core
-   ~25% below max, which especially slows game launches).
+**Quick Access menu:** RP5 — press **Back** or double-tap **Home**; Flip 2 /
+Mini V2 — double-tap **Home**.
 
-**Known quirk — silent game launch:** if a game starts with no sound, tap the
-**Home** button once (open and close the Steam menu) — audio kicks in. Being
-tracked.
+## Known issues
 
-**In progress / not yet validated:** headphone jack, Bluetooth, RP5 rumble.
+- Silent game launch occasionally: tap **Home** once (open/close Steam menu)
+  and audio kicks in. Tracked.
+- Some titles run a few FPS below the previous release on the new FEX 2607
+  core; per-game FEX version selection is in development.
+- First run of a game may stutter briefly while caches build, then smooths out.
+- Headphone jack and Bluetooth audio not yet validated.
+- Sleep is "fake-suspend" (screen/input off, instant wake) — true
+  suspend-to-RAM remains an open problem on SM8250 for every distro.
 
----
+## How this fork differs from upstream
 
-## Advanced: install to internal storage (optional, RP5)
+Upstream Armada targets SM8550/SM8650/SM8750. SM8250 needed its own:
 
-> ⚠️ **Advanced & destructive to Android.** The default Armada experience is the
-> non-invasive SD card above — nothing written to the device. This optional step
-> is the opposite: it repartitions internal storage and **factory-resets
-> Android.** Do it only if you understand that. Proven on the **Retroid Pocket 5**.
-
-Once Armada is running from the SD card, you can install it onto the RP5's
-**internal UFS storage** so it boots without the SD card — noticeably faster game
-loads (measured ~60%; internal UFS crushes the SD card at the random I/O games
-do, which is the main game-load bottleneck). Android is **kept but
-factory-reset**, and its storage is shrunk to make room.
-
-**Still no bootloader flashing.** This writes nothing to `xbl`/`abl`/`boot`/
-`super`/`vbmeta` and needs no EDL cable or PC. The stock RP5 UEFI boots a
-boot-flagged internal ESP directly — proven on hardware (`efibootmgr` →
-`BootCurrent = scsi0`). Because no bootloader bytes are touched, there is no brick
-path: worst case is "put the SD card back and boot from it."
-
-**Requirements:** an RP5 running Armada **from the SD card** (you must be booted
-from SD, not internal), and root access.
-
-```bash
-# Default split: Android keeps ~20 GiB, Armada gets the rest
-sudo /usr/libexec/armada/armada-865-install-internal
-
-# Or choose the split (pass at most one):
-sudo /usr/libexec/armada/armada-865-install-internal --android-size 32
-sudo /usr/libexec/armada/armada-865-install-internal --armada-size 90
-```
-
-It backs up the partition table first, prints the exact plan, asks for
-confirmation (skip with `--yes`), then partitions, stages the ESP, deploys the
-running image with `ostree`, and repoints GRUB at the internal root. When it
-finishes: **power off, remove the SD card, power on, and hold Vol+** through the
-Android splash to reach GRUB and boot Armada from internal. Boot **without** Vol+
-to get Android.
-
-**Reinstall / undo:** to redo the install, remove it first, then re-run the
-installer; to fully back out, remove it and give the space back to Android:
-
-```bash
-# Try again with a different split: remove, leave the space free, reinstall
-sudo /usr/libexec/armada/armada-865-uninstall-internal --keep-free
-sudo /usr/libexec/armada/armada-865-install-internal --armada-size 90
-
-# Undo entirely: remove Armada and grow Android back to full size
-sudo /usr/libexec/armada/armada-865-uninstall-internal
-```
-
-Or simply re-insert the SD and boot it — it is never modified.
-(`armada-865-uninstall-internal` backs up the GPT first but is newer than the
-installer; treat it as beta.)
-
-Full walkthrough and rollback details:
-[`docs/internal-install.md`](docs/internal-install.md).
-
----
-
-## How this fork differs from upstream Armada
-
-### Boot architecture (the biggest structural change)
-
-Upstream SM8550+ devices boot via the ABL directly loading an Android boot image
-from `/KERNEL` on the SD card. **The SM8250 ABL chain doesn't support that
-path** — here the chain is `ABL → U-Boot → EFI → GRUB`, so this fork boots via
-**GRUB/EFI**: a GRUB binary + menu on the ESP, a **raw ARM64 kernel** at
-`/KERNEL`, initramfs at `/INITRD`, per-device DTBs selected in the GRUB menu.
-The shutdown-time boot-payload regeneration (`armada-bootimg-sync`) is
-overridden to be GRUB-only on SM8250 — the upstream writer would overwrite
-`/KERNEL` with an Android bootimg and break boot (learned the hard way, about a
-dozen SD-card rescues' worth).
-
-### Kernel ([`armada-packages`](https://github.com/jsbonsai/armada-packages/tree/sm8250) branch `sm8250`)
-
-- RP5 / Flip 2 device trees vendored from ROCKNIX, built on Armada's unified kernel.
-- ~13 ROCKNIX SM8250 patches: Retroid UART-MCU gamepad (+ force feedback),
-  ICNA35XX/CH13726A panels, PM8150B PMIC, SPMI haptics, display fixes, q6asm
-  period sizing, WSA881x shared powerdown GPIO, headphone jack detection.
-- PM8150B **battery fuel-gauge and charger drivers enabled** (the drivers were
-  in the patch set but never switched on — no battery % without this).
-- **Original fix (`0812`)**: the q6asm-dai driver leaked its ADSP session on
-  stop→prepare cycles (e.g. XRUN recovery during game-launch CPU spikes),
-  permanently killing audio until reboot (`Buffer already allocated`, DSP error
-  9). This fork tracks session state and tears stale sessions down on
-  re-prepare. Candidate for upstreaming to ROCKNIX/mainline.
-
-### Audio (the war story)
-
-SM8250 uses the older q6asm ADSP framework (not AudioReach like SM8550+), and
-the speaker path — WSA881x amplifiers on SoundWire — failed four independent
-ways. This fork ships, in order of discovery:
-
-1. **Correct DAPM routing order** — the two CODEC-DMA mixer controls knock each
-   other off; the playback route must be set last.
-2. **The kernel session-lifecycle fix** above.
-3. **Amplifier runtime-PM pinning** — the amps intermittently fail
-   wake-from-clock-stop on the SoundWire bus and go silently dead with zero DSP
-   errors; a udev rule keeps them out of runtime suspend.
-4. **A held-open PCM + watchdog** — a permanent inaudible stream prevents the
-   stop→start transitions that lose an AFE/SoundWire start race (DMA arms but
-   never clocks), and a 30-second watchdog detects every observed failure
-   signature (frozen `hw_ptr`, PipeWire/kernel state mismatch, error storms)
-   and recovers automatically.
-
-Net effect: if audio ever drops, it heals itself within ~30 seconds. The whole
-lifecycle is instrumented — `journalctl -t sm8250-audio -t sm8250-audio-monitor
--t sm8250-audio-keepalive` narrates it, and that's what bug reports should
-attach. Also: WirePlumber auto-ALSA is disabled for this card, the sink is
-created manually on the speaker PCM, and the PipeWire graph is pinned to 48 kHz
-with a raised minimum quantum.
-
-### Input
-
-- InputPlumber profiles for the Retroid gamepad (UART MCU) presenting as a
-  **deck-uhid** SteamOS handheld controller.
-- Quick-access menu on the RP5's Back button (`BTN_BACK → QuickAccess`).
-- Flip 2 (one fewer button): double-press-Home QAM in progress.
-
-### Device model & power
-
-- RP5 / Flip 2 device profiles (panel orientation, rotation shader, GPU floor).
-- SM8250 power tiers are **underclock-only** (Eco/Balanced/Performance — no
-  overclocking), selectable from the QAM.
-- MangoHud patched for the Adreno 650.
-- SoC-specific udev/PM rules per the audio section.
-
-### Build & release
-
-Same CI shape as upstream (container image on push → manual disk-image build),
-with kernel/MangoHud package digests pinned to `armada-packages` branch
-`sm8250`. `/etc/armada/` carries the bring-up scripts, made executable and
-enabled at image build.
-
----
+- **Boot architecture** — GRUB/EFI via the stock Retroid U-Boot chain (upstream
+  uses an Android-bootimg path); per-device DTB auto-selection; no bootloader
+  flash on Retroid hardware.
+- **Kernel enablement** — SM8250 device trees (incl. our Mini V2 port), panel,
+  input, battery, and audio patches; see
+  [armada-packages](https://github.com/jsbonsai/armada-packages/tree/sm8250).
+- **Audio bring-up** — the SM8250's legacy ADSP audio stack required extensive
+  kernel and userspace work (a self-healing pipeline with watchdogs). The full
+  engineering story lives in the repo history; the short version is: it works,
+  and it repairs itself if the DSP misbehaves.
+- **Fan control tuning**, per-device power profiles, input calibration, and the
+  internal-install tooling for this hardware generation.
 
 ## Reporting issues
 
-Open a GitHub issue with your device, the image version, and what happened.
-
-**Attaching logs (optional but very helpful):** SSH is **off by default**. To
-enable it: from the Steam UI, **STEAM → Power → Switch to Desktop**, open
-**Konsole**, and run `sudo systemctl enable --now sshd` (password `armada`).
-Then from another computer, `ssh armada@<device-ip>` (IP is in Steam's network
-settings) and attach:
-
-```
-journalctl -t sm8250-audio -t sm8250-audio-monitor -t sm8250-audio-keepalive -b
-sudo dmesg | grep -iE 'q6asm|q6adm|wsa88'
-```
-
-> Leaving SSH enabled with the default `armada` password lets anyone on your
-> network log in — change the password (`passwd`) or disable SSH again when done.
+Run `sudo armada-report` in Desktop Mode (Konsole) — it bundles logs (no
+secrets) into a tar.gz on the Desktop. Open a
+[GitHub issue](../../issues/new/choose) with your device, version
+(Steam Settings → System), and the archive attached.
 
 ## Building it yourself
 
-This repo (branch `sm8250`) is the OS image; packages build in
-[`armada-packages`](https://github.com/jsbonsai/armada-packages/tree/sm8250).
-Push → container CI; the "Build disk image" workflow produces the flashable
-`.img`. See upstream Armada for the general build architecture.
+CI builds everything: pushes to `sm8250` build and sign the OS container;
+`build-disk.yml` produces the flashable image; `release.yml` publishes it.
+Local builds: `just build-armada-image` on an ARM64 Linux host.
 
 ## Credits
 
-- **[virtudude/armada](https://github.com/virtudude/armada)** — the distro this
-  forks; all the distro-level work is theirs.
-- **[ROCKNIX](https://github.com/ROCKNIX/distribution)** — SM8250 device trees,
-  the kernel patch set, and the signed ABL chain.
-- FEX-Emu, Mesa/freedreno, InputPlumber, gamescope, and the CachyOS Proton builds.
+Built on [Armada](https://github.com/virtudude/armada) by virtudude, the
+[ROCKNIX](https://rocknix.org) project's SM8250 kernel enablement,
+[Retroid's U-Boot](https://github.com/RetroidPocket/u-boot), FEX-Emu, CachyOS
+Proton, and the freedreno/turnip Mesa stack. Thank you all.
