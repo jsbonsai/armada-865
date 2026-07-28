@@ -62,14 +62,37 @@ setup_audio() {
     /etc/armada/sm8250-audio-init mixers
 }
 
+setup_power() {
+    # Per-device fan/power overrides: install the model's fragment as the /etc
+    # powerd override (merged over the factory config by armada-powerd). The
+    # version stamp on line 1 gates reinstall so a shipped update can revise the
+    # curves on provisioned devices, while an unchanged stamp leaves any local
+    # hand-tuning alone between updates. Mini V2 only today; other models keep
+    # factory behavior (no fragment -> no override).
+    local frag dst=/etc/armada/power-profiles.conf
+    case "$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)" in
+        *"Mini V2"*) frag=/usr/share/armada/power-profiles.d/retroid-pocket-mini-v2.conf ;;
+        *) return 0 ;;
+    esac
+    [ -r "$frag" ] || return 0
+    if [ -f "$dst" ] && [ "$(head -1 "$frag")" = "$(head -1 "$dst")" ]; then
+        return 0
+    fi
+    # || return 0: bringup runs under set -e; a failed install must not abort
+    # the rest of bring-up (SoundWire PM pinning below is audio-critical).
+    install -m 0644 "$frag" "$dst" 2>/dev/null || return 0
+    systemctl try-restart armada-powerd 2>/dev/null || true
+}
+
 case "$mode" in
-    boot) setup_boot ;;
+    boot) setup_boot; setup_power ;;
     input) setup_input ;;
     audio) setup_audio ;;
     all)
         setup_boot
         setup_input
         setup_audio
+        setup_power
         ;;
     *)
         echo "Usage: $0 [input|audio|all]" >&2
