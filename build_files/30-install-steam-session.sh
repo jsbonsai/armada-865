@@ -33,14 +33,24 @@ dnf5 -y install --setopt=install_weak_deps=False --enable-repo=terra \
     gamescope-session \
     steam-notif-daemon
 
-# ROCKNIX's --use-rotation-shader patch makes this a no-arg flag.
-if ! grep -q 'USE_ROTATION_SHADER_OPTION="--use-rotation-shader $USE_ROTATION_SHADER"' \
+# Terra's gamescope-session (rolling) refactored rotation handling onto upstream's
+# --force-composition-rotation (as of 0~20260801git.153e1f0). Our custom gamescope
+# carries ROCKNIX's --use-rotation-shader flag instead and has NO
+# --force-composition-rotation option, and rotated panels (Mini V2 / Flip 2, etc.)
+# drive it via ARMADA_GAMESCOPE_USE_ROTATION_SHADER -> USE_ROTATION_SHADER. So re-map
+# upstream's rotation block back onto --use-rotation-shader. Guard on the upstream
+# anchor so a future Terra refactor STOPS the build instead of silently dropping
+# rotation on those panels.
+if ! grep -q 'FORCE_COMPOSITION_ROTATION_OPTION="--force-composition-rotation"' \
     /usr/share/gamescope-session-plus/gamescope-session-plus; then
-    echo "ERROR: gamescope-session-plus rotation-shader hook changed; inspect before patching" >&2
+    echo "ERROR: gamescope-session-plus rotation hook changed; inspect before patching" >&2
     exit 1
 fi
 sed -i \
-    's/USE_ROTATION_SHADER_OPTION="--use-rotation-shader $USE_ROTATION_SHADER"/USE_ROTATION_SHADER_OPTION="--use-rotation-shader"/' \
+    -e 's/FORCE_COMPOSITION_ROTATION_OPTION/USE_ROTATION_SHADER_OPTION/g' \
+    -e 's/USE_ROTATION_SHADER_OPTION="--force-composition-rotation"/USE_ROTATION_SHADER_OPTION="--use-rotation-shader"/' \
+    -e 's/\[ "\$FORCE_COMPOSITION_ROTATION" = "1" \]/[ -n "$USE_ROTATION_SHADER" ]/' \
+    -e 's/gamescope_has_option "--force-composition-rotation"/gamescope_has_option "--use-rotation-shader"/' \
     /usr/share/gamescope-session-plus/gamescope-session-plus
 
 # Avoid xtrace spam during every game-mode startup.
